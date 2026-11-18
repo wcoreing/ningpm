@@ -169,6 +169,14 @@ func (s *Store) sqlConcat(parts ...string) string {
 	return strings.Join(parts, " || ")
 }
 
+// orderByNameAsc returns a case-insensitive name sort expression for the current driver.
+func (s *Store) orderByNameAsc(expr string) string {
+	if s.driver == "mysql" {
+		return "ORDER BY " + expr + " ASC"
+	}
+	return "ORDER BY " + expr + " COLLATE NOCASE ASC"
+}
+
 // insertIgnoreSQL builds INSERT IGNORE / INSERT OR IGNORE for column list like `t(a,b)`.
 func (s *Store) insertIgnoreSQL(tableCols string) string {
 	placeholders := "?"
@@ -1416,7 +1424,7 @@ SELECT m.id, m.project_id, m.name, m.description, m.status, COALESCE(m.lead_id, 
 FROM modules m
 LEFT JOIN users u ON u.id = m.lead_id
 WHERE m.project_id = ?
-ORDER BY m.name COLLATE NOCASE ASC`, projectID)
+` + s.orderByNameAsc("m.name"), projectID)
 	if err != nil {
 		return nil, err
 	}
