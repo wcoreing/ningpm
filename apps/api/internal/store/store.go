@@ -120,6 +120,14 @@ func (s *Store) idType() string {
 	return "TEXT"
 }
 
+// textDef is a text-ish column that may carry DEFAULT '' (MySQL forbids DEFAULT on TEXT).
+func (s *Store) textDef() string {
+	if s.driver == "mysql" {
+		return "VARCHAR(4096) NOT NULL DEFAULT ''"
+	}
+	return "TEXT NOT NULL DEFAULT ''"
+}
+
 // projectKeyCol returns a qualified projects.key reference that is safe on MySQL.
 func (s *Store) projectKeyCol(alias string) string {
 	if alias == "" {
@@ -147,6 +155,7 @@ func (s *Store) sqlConcat(parts ...string) string {
 
 func (s *Store) migrate() error {
 	id := s.idType()
+	td := s.textDef()
 	keyCol := "key"
 	if s.driver == "mysql" {
 		keyCol = "`key`"
@@ -163,7 +172,7 @@ CREATE TABLE IF NOT EXISTS projects (
   id %s PRIMARY KEY,
   %s %s NOT NULL UNIQUE,
   name TEXT NOT NULL,
-  description TEXT NOT NULL DEFAULT '',
+  description %s,
   creator_id %s NOT NULL,
   created_at TEXT NOT NULL
 );
@@ -173,7 +182,7 @@ CREATE TABLE IF NOT EXISTS issues (
   number INTEGER NOT NULL,
   type TEXT NOT NULL,
   title TEXT NOT NULL,
-  description TEXT NOT NULL DEFAULT '',
+  description %s,
   status TEXT NOT NULL,
   priority INTEGER NOT NULL DEFAULT 3,
   assignee_id %s NULL,
@@ -205,7 +214,7 @@ CREATE TABLE IF NOT EXISTS cycles (
   id %s PRIMARY KEY,
   project_id %s NOT NULL,
   name TEXT NOT NULL,
-  goal TEXT NOT NULL DEFAULT '',
+  goal %s,
   status TEXT NOT NULL,
   start_date TEXT NOT NULL,
   end_date TEXT NOT NULL,
@@ -217,11 +226,11 @@ CREATE TABLE IF NOT EXISTS modules (
   id %s PRIMARY KEY,
   project_id %s NOT NULL,
   name TEXT NOT NULL,
-  description TEXT NOT NULL DEFAULT '',
+  description %s,
   status TEXT NOT NULL,
   lead_id %s NULL,
-  start_date TEXT NOT NULL DEFAULT '',
-  target_date TEXT NOT NULL DEFAULT '',
+  start_date %s,
+  target_date %s,
   created_at TEXT NOT NULL,
   FOREIGN KEY(project_id) REFERENCES projects(id)
 );
@@ -233,7 +242,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   kind TEXT NOT NULL,
   issue_id %s NOT NULL,
   project_id %s NOT NULL,
-  body TEXT NOT NULL DEFAULT '',
+  body %s,
   read_at TEXT NULL,
   created_at TEXT NOT NULL,
   FOREIGN KEY(user_id) REFERENCES users(id),
@@ -245,13 +254,13 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, crea
 CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, read_at);
 `,
 		id, id, // users
-		id, keyCol, id, id, // projects
-		id, id, id, id, // issues
+		id, keyCol, id, td, id, // projects
+		id, id, td, id, id, // issues
 		id, id, id, // comments
 		id, id, // project_members
-		id, id, // cycles
-		id, id, id, // modules
-		id, id, id, id, id, // notifications
+		id, id, td, // cycles
+		id, id, td, id, td, td, // modules
+		id, id, id, id, id, td, // notifications
 	))
 	if err != nil {
 		return err
