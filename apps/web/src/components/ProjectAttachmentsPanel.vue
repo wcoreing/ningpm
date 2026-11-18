@@ -8,6 +8,7 @@ import {
   fetchResourceBlob,
   formatBytes,
   isImageContentType,
+  uploadResource,
 } from "../lib/upload"
 import AttachmentPreviewDialog from "./AttachmentPreviewDialog.vue"
 
@@ -26,6 +27,33 @@ export type ProjectAttachment = {
   createdAt: string
 }
 
+export type ProjectFile = {
+  id: string
+  projectId: string
+  resourceId: string
+  originalName: string
+  contentType: string
+  sizeBytes: number
+  url: string
+  createdBy: string
+  creatorName?: string
+  createdAt: string
+}
+
+type FileRow = {
+  id: string
+  resourceId: string
+  originalName: string
+  contentType: string
+  sizeBytes: number
+  url: string
+  creatorName?: string
+  createdAt: string
+  issueId?: string
+  issueKey?: string
+  issueTitle?: string
+}
+
 const props = defineProps<{
   projectId: string
   canWrite?: boolean
@@ -37,15 +65,49 @@ const emit = defineEmits<{
   changed: []
 }>()
 
+type Tab = "materials" | "attachments"
+const tab = ref<Tab>("materials")
+
 const loading = ref(false)
+const uploading = ref(false)
 const error = ref("")
-const items = ref<ProjectAttachment[]>([])
+const materials = ref<ProjectFile[]>([])
+const attachments = ref<ProjectAttachment[]>([])
 const query = ref("")
+const fileInput = ref<HTMLInputElement | null>(null)
 const thumbUrls = ref<Record<string, string>>({})
 const previewDialog = ref<{
   show: (o: { name: string; url: string; contentType?: string }) => Promise<void>
   close: () => void
 } | null>(null)
+
+const items = computed<FileRow[]>(() => {
+  if (tab.value === "materials") {
+    return materials.value.map((f) => ({
+      id: f.id,
+      resourceId: f.resourceId,
+      originalName: f.originalName,
+      contentType: f.contentType,
+      sizeBytes: f.sizeBytes,
+      url: f.url,
+      creatorName: f.creatorName,
+      createdAt: f.createdAt,
+    }))
+  }
+  return attachments.value.map((a) => ({
+    id: a.id,
+    resourceId: a.resourceId,
+    originalName: a.originalName,
+    contentType: a.contentType,
+    sizeBytes: a.sizeBytes,
+    url: a.url,
+    creatorName: a.creatorName,
+    createdAt: a.createdAt,
+    issueId: a.issueId,
+    issueKey: a.issueKey,
+    issueTitle: a.issueTitle,
+  }))
+})
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
@@ -57,12 +119,14 @@ const filtered = computed(() => {
 })
 
 const totalBytes = computed(() => items.value.reduce((sum, a) => sum + (a.sizeBytes || 0), 0))
+const materialCount = computed(() => materials.value.length)
+const attachmentCount = computed(() => attachments.value.length)
 
-function kindOf(att: ProjectAttachment) {
+function kindOf(att: FileRow) {
   return previewKind(att.originalName, att.contentType)
 }
 
-function canPreview(att: ProjectAttachment) {
+function canPreview(att: FileRow) {
   return kindOf(att) !== "none"
 }
 
@@ -71,7 +135,7 @@ function revokeThumbs() {
   thumbUrls.value = {}
 }
 
-async function loadThumbs(list: ProjectAttachment[]) {
+async function loadThumbs(list: FileRow[]) {
   revokeThumbs()
   const next: Record<string, string> = {}
   await Promise.all(
@@ -94,16 +158,46 @@ async function load() {
   loading.value = true
   error.value = ""
   try {
-    items.value = await api<ProjectAttachment[]>(`/api/projects/${props.projectId}/attachments`)
-    void loadThumbs(items.value)
+    const [mats, atts] = await Promise.all([
+      api<ProjectFile[]>(`/api/projects/${props.projectId}/files`),
+      api<ProjectAttachment[]>(`/api/projects/${props.projectId}/attachments`),
+    ])
+    materials.value = mats
+    attachments.value = atts
+    const rows: FileRow[] =
+      tab.value === "materials"
+        ? mats.map((f) => ({
+            id: f.id,
+            resourceId: f.resourceId,
+            originalName: f.originalName,
+            contentType: f.contentType,
+            sizeBytes: f.sizeBytes,
+            url: f.url,
+            creatorName: f.creatorName,
+            createdAt: f.createdAt,
+          }))
+        : atts.map((a) => ({
+            id: a.id,
+            resourceId: a.resourceId,
+            originalName: a.originalName,
+            contentType: a.contentType,
+            sizeBytes: a.sizeBytes,
+            url: a.url,
+            creatorName: a.creatorName,
+            createdAt: a.createdAt,
+            issueId: a.issueId,
+            issueKey: a.issueKey,
+            issueTitle: a.issueTitle,
+          }))
+    void loadThumbs(rows)
   } catch (e) {
-    error.value = e instanceof Error ? e.message : "加载附件失败"
+    error.value = e instanceof Error ? e.message : "加载文件失败"
   } finally {
     loading.value = false
   }
 }
 
-async function openPreview(att: ProjectAttachment) {
+async function openPreview(att: FileRow) {
   await previewDialog.value?.show({
     name: att.originalName,
     url: att.url || `/api/resources/${att.resourceId}`,
@@ -111,7 +205,7 @@ async function openPreview(att: ProjectAttachment) {
   })
 }
 
-async function onDownload(att: ProjectAttachment) {
+async function onDownload(att: FileRow) {
   try {
     await downloadResource(att.url || `/api/resources/${att.resourceId}`, att.originalName)
   } catch (e) {
@@ -119,20 +213,61 @@ async function onDownload(att: ProjectAttachment) {
   }
 }
 
-async function onRemove(att: ProjectAttachment) {
+async function onRemove(att: FileRow) {
   if (props.canWrite === false) return
   try {
-    await api(`/api/issues/${att.issueId}/attachments/${att.id}`, { method: "DELETE" })
+    if (tab.value === "materials") {
+      await api(`/api/projects/${props.projectId}/files/${att.id}`, { method: "DELETE" })
+      materials.value = materials.value.filter((f) => f.id !== att.id)
+      toast.success("已删除资料")
+    } else {
+      if (!att.issueId) return
+      await api(`/api/issues/${att.issueId}/attachments/${att.id}`, { method: "DELETE" })
+      attachments.value = attachments.value.filter((a) => a.id !== att.id)
+      toast.success("已删除附件")
+    }
     if (thumbUrls.value[att.id]) {
       URL.revokeObjectURL(thumbUrls.value[att.id])
       const { [att.id]: _, ...rest } = thumbUrls.value
       thumbUrls.value = rest
     }
-    items.value = items.value.filter((a) => a.id !== att.id)
     emit("changed")
-    toast.success("已删除附件")
   } catch (e) {
     toast.error(e instanceof Error ? e.message : "删除失败")
+  }
+}
+
+async function onPickFile(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ""
+  if (!file || !props.projectId || props.canWrite === false) return
+  uploading.value = true
+  error.value = ""
+  try {
+    const res = await uploadResource(file)
+    const created = await api<ProjectFile>(`/api/projects/${props.projectId}/files`, {
+      method: "POST",
+      body: JSON.stringify({ resourceId: res.id }),
+    })
+    materials.value = [created, ...materials.value]
+    tab.value = "materials"
+    if (isImageContentType(created.contentType)) {
+      try {
+        const blob = await fetchResourceBlob(created.url || `/api/resources/${created.resourceId}`)
+        thumbUrls.value = { ...thumbUrls.value, [created.id]: URL.createObjectURL(blob) }
+      } catch {
+        /* ignore */
+      }
+    }
+    emit("changed")
+    toast.success("资料已上传")
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "上传资料失败"
+    error.value = msg
+    toast.error(msg)
+  } finally {
+    uploading.value = false
   }
 }
 
@@ -145,6 +280,12 @@ function formatTime(iso: string) {
     hour: "2-digit",
     minute: "2-digit",
   })
+}
+
+function setTab(next: Tab) {
+  if (tab.value === next) return
+  tab.value = next
+  void loadThumbs(items.value)
 }
 
 watch(
@@ -166,32 +307,75 @@ defineExpose({ reload: load })
 
 <template>
   <div class="panel">
+    <div class="tabs">
+      <button
+        type="button"
+        class="tab"
+        :class="{ active: tab === 'materials' }"
+        @click="setTab('materials')"
+      >
+        资料
+        <span class="count">{{ materialCount }}</span>
+      </button>
+      <button
+        type="button"
+        class="tab"
+        :class="{ active: tab === 'attachments' }"
+        @click="setTab('attachments')"
+      >
+        附件
+        <span class="count">{{ attachmentCount }}</span>
+      </button>
+    </div>
+
     <div class="toolbar">
       <div class="stats">
         <strong>{{ items.length }}</strong>
-        <span>个附件</span>
+        <span>{{ tab === "materials" ? "个资料" : "个附件" }}</span>
         <span class="dot">·</span>
         <span>{{ formatBytes(totalBytes) }}</span>
       </div>
       <div class="actions">
-        <NpInput v-model="query" placeholder="搜文件名 / 事项 / 上传人" />
+        <NpInput
+          v-model="query"
+          :placeholder="tab === 'materials' ? '搜文件名 / 上传人' : '搜文件名 / 事项 / 上传人'"
+        />
         <NpButton size="sm" variant="secondary" :disabled="loading" @click="load">
           {{ loading ? "刷新中…" : "刷新" }}
         </NpButton>
+        <template v-if="tab === 'materials' && canWrite !== false">
+          <input
+            ref="fileInput"
+            type="file"
+            class="file-input"
+            @change="onPickFile"
+          />
+          <NpButton
+            size="sm"
+            :disabled="uploading"
+            @click="fileInput?.click()"
+          >
+            {{ uploading ? "上传中…" : "上传资料" }}
+          </NpButton>
+        </template>
       </div>
     </div>
 
     <p v-if="error" class="error">{{ error }}</p>
     <p v-else-if="loading && !items.length" class="muted">加载中…</p>
     <p v-else-if="!filtered.length" class="muted empty">
-      {{ items.length ? "没有匹配的附件" : "还没有附件" }}
+      <template v-if="items.length">没有匹配的{{ tab === "materials" ? "资料" : "附件" }}</template>
+      <template v-else-if="tab === 'materials'">
+        还没有项目资料，可直接上传需求文档、合同、设计稿等
+      </template>
+      <template v-else>还没有事项附件</template>
     </p>
 
     <div v-else class="table-wrap">
-      <table class="table">
+      <table class="table" :class="{ 'no-issue': tab === 'materials' }">
         <colgroup>
           <col class="col-file" />
-          <col class="col-issue" />
+          <col v-if="tab === 'attachments'" class="col-issue" />
           <col class="col-size" />
           <col class="col-user" />
           <col class="col-time" />
@@ -200,7 +384,7 @@ defineExpose({ reload: load })
         <thead>
           <tr>
             <th>文件</th>
-            <th>事项</th>
+            <th v-if="tab === 'attachments'">事项</th>
             <th>大小</th>
             <th>上传人</th>
             <th>时间</th>
@@ -220,7 +404,7 @@ defineExpose({ reload: load })
                 </button>
               </div>
             </td>
-            <td>
+            <td v-if="tab === 'attachments'">
               <button
                 v-if="att.issueId"
                 type="button"
@@ -272,6 +456,54 @@ defineExpose({ reload: load })
   gap: 14px;
 }
 
+.tabs {
+  display: flex;
+  gap: 4px;
+  width: fit-content;
+  padding: 3px;
+  border-radius: 10px;
+  background: #f1f5f9;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  padding: 7px 14px;
+  border-radius: 8px;
+  color: var(--np-text-muted);
+  font: inherit;
+  font-size: var(--np-text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tab.active {
+  background: #fff;
+  color: var(--np-text);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: var(--np-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+
+.tab.active .count {
+  background: #e0e7ff;
+  color: #3730a3;
+}
+
 .toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -301,12 +533,16 @@ defineExpose({ reload: load })
   display: flex;
   align-items: center;
   gap: 8px;
-  min-width: min(420px, 100%);
+  min-width: min(520px, 100%);
 }
 
 .actions :deep(.np-input) {
   flex: 1;
   min-width: 180px;
+}
+
+.file-input {
+  display: none;
 }
 
 .table-wrap {
@@ -340,6 +576,22 @@ defineExpose({ reload: load })
 }
 .col-ops {
   width: 11%;
+}
+
+.table.no-issue .col-file {
+  width: 48%;
+}
+.table.no-issue .col-size {
+  width: 12%;
+}
+.table.no-issue .col-user {
+  width: 16%;
+}
+.table.no-issue .col-time {
+  width: 14%;
+}
+.table.no-issue .col-ops {
+  width: 10%;
 }
 
 .table th,

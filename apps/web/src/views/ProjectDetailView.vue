@@ -23,9 +23,11 @@ import {
   typeTone,
 } from "../lib/labels"
 import type { Cycle, Issue, Module, UserOption } from "../types"
+import { exportProjectReport } from "../lib/reportExport"
 import { useAuthStore } from "../stores/auth"
 import { usePageHeaderStore } from "../stores/pageHeader"
 import { useProjectStore } from "../stores/project"
+import { useProjectsStore } from "../stores/projects"
 import IssueDetailDrawer from "../components/IssueDetailDrawer.vue"
 import ModuleTagPicker from "../components/ModuleTagPicker.vue"
 import ProjectAttachmentsPanel from "../components/ProjectAttachmentsPanel.vue"
@@ -36,6 +38,7 @@ const router = useRouter()
 const auth = useAuthStore()
 const pageHeader = usePageHeaderStore()
 const projectStore = useProjectStore()
+const projectsStore = useProjectsStore()
 const {
   project,
   issues,
@@ -53,22 +56,26 @@ const {
   canLeaveProject,
 } = storeToRefs(projectStore)
 
-/** board | list | cycles | members | attachments — 列表默认表格 */
+/** board | list | tree | cycles | reports | members | files */
 const view = ref("board")
-/** 工作区上次用的展示方式（从迭代/成员/附件返回时恢复） */
-const workMode = ref<"board" | "list">("board")
+/** 工作区上次用的展示方式（从迭代/成员/文件/报表返回时恢复） */
+const workMode = ref<"board" | "list" | "tree">("board")
 const typeFilter = ref("all")
-const cycleFilter = ref("active") // all | active | backlog | <cycleId>
+const statusFilter = ref("all") // all | todo | doing | review | done
+const cycleFilter = ref("all") // all | active | backlog | <cycleId>
 const moduleFilter = ref("all")
 const attachmentsPanel = ref<{ reload: () => Promise<void> } | null>(null)
+/** 树形视图：折叠的根事项 id */
+const treeCollapsed = ref<Set<string>>(new Set())
 
-const isWork = computed(() => view.value === "board" || view.value === "list")
+const isWork = computed(() => view.value === "board" || view.value === "list" || view.value === "tree")
 const sideNav = computed(() => (isWork.value ? "work" : view.value))
 
 const sideItems = [
   { value: "work", label: "看板", icon: "board" },
   { value: "cycles", label: "迭代", icon: "cycle" },
-  { value: "attachments", label: "附件", icon: "attachments" },
+  { value: "reports", label: "报表", icon: "reports" },
+  { value: "files", label: "文件", icon: "attachments" },
   { value: "members", label: "成员", icon: "members" },
 ] as const
 
@@ -81,6 +88,9 @@ function goSide(value: (typeof sideItems)[number]["value"]) {
 }
 const open = ref(false)
 const cycleOpen = ref(false)
+const editOpen = ref(false)
+const editSaving = ref(false)
+const editForm = ref({ name: "", description: "" })
 const saving = ref(false)
 const detailOpen = ref(false)
 const activeIssueId = ref<string | null>(null)
@@ -111,9 +121,15 @@ const cycleForm = ref({
 
 const typeTabs = [
   { value: "all", label: "全部" },
+  { value: "epic", label: "史诗" },
   { value: "story", label: "需求" },
   { value: "task", label: "任务" },
   { value: "bug", label: "缺陷" },
+]
+
+const statusTabs = [
+  { value: "all", label: "全部状态" },
+  ...STATUS_ORDER.map((status) => ({ value: status, label: STATUS_LABELS[status] })),
 ]
 
 const memberIdSet = computed(() => new Set(members.value.map((m) => m.userId)))
@@ -185,10 +201,16 @@ const cycleFilterTabs = computed(() => {
   return tabs
 })
 
+/** 看板/列表只展示根事项；子任务在详情抽屉内推进 */
+const rootIssues = computed(() => issues.value.filter((i) => !i.parentId))
+
 const filtered = computed(() => {
-  let list = issues.value
+  let list = rootIssues.value
   if (typeFilter.value !== "all") {
     list = list.filter((i) => i.type === typeFilter.value)
+  }
+  if (statusFilter.value !== "all") {
+    list = list.filter((i) => i.status === statusFilter.value)
   }
   if (cycleFilter.value === "active") {
     const id = activeCycle.value?.id
@@ -204,13 +226,221 @@ const filtered = computed(() => {
   return list
 })
 
-const columns = computed(() =>
-  STATUS_ORDER.map((status) => ({
+type StatRow = { key: string; label: string; total: number; done: number; doing: number; todo: number; review: number }
+
+function buildRows(
+  source: typeof issues.value,
+  keyOf: (i: (typeof issues.value)[number]) => string,
+  labelOf: (key: string, sample?: (typeof issues.value)[number]) => string,
+): StatRow[] {
+  const map = new Map<string, StatRow>()
+  for (const it of source) {
+    const key = keyOf(it) || "_"
+    let row = map.get(key)
+    if (!row) {
+      row = { key, label: labelOf(key, it), total: 0, done: 0, doing: 0, todo: 0, review: 0 }
+      map.set(key, row)
+    }
+    row.total += 1
+    if (it.status === "done") row.done += 1
+    else if (it.status === "doing") row.doing += 1
+    else if (it.status === "review") row.review += 1
+    else row.todo += 1
+  }
+  return [...map.values()].sort((a, b) => b.total - a.total || a.label.localeCompare(b.label, "zh"))
+}
+
+/** 报表：优先用已加载的子事项；若仅有根事项则用 childCount/childDoneCount 汇总 */
+const reportScope = computed(() => issues.value)
+const loadedChildren = computed(() => issues.value.filter((i) => Boolean(i.parentId)))
+
+const reportSummary = computed(() => {
+  const roots = rootIssues.value
+  const childrenLoaded = loadedChildren.value
+  const childTotal =
+    childrenLoaded.length > 0
+      ? childrenLoaded.length
+      : roots.reduce((s, i) => s + (i.childCount || 0), 0)
+  const childDone =
+    childrenLoaded.length > 0
+      ? childrenLoaded.filter((i) => i.status === "done").length
+      : roots.reduce((s, i) => s + (i.childDoneCount || 0), 0)
+  const rootDone = roots.filter((i) => i.status === "done").length
+  const all = childrenLoaded.length > 0 ? reportScope.value : null
+  const done = all
+    ? all.filter((i) => i.status === "done").length
+    : rootDone + childDone
+  const doing = all
+    ? all.filter((i) => i.status === "doing").length
+    : roots.filter((i) => i.status === "doing").length
+  const review = all
+    ? all.filter((i) => i.status === "review").length
+    : roots.filter((i) => i.status === "review").length
+  const todo = all
+    ? all.filter((i) => i.status === "todo").length
+    : roots.filter((i) => i.status === "todo").length
+  const total = all ? all.length : roots.length + childTotal
+  const rate = total ? Math.round((done / total) * 100) : 0
+  return {
+    total,
+    done,
+    doing,
+    review,
+    todo,
+    rate,
+    roots: roots.length,
+    rootDone,
+    children: childTotal,
+    childDone,
+    childRate: childTotal ? Math.round((childDone / childTotal) * 100) : 0,
+  }
+})
+
+const reportByStatus = computed(() => {
+  if (loadedChildren.value.length > 0) {
+    return STATUS_ORDER.map((status) => ({
+      status,
+      label: STATUS_LABELS[status],
+      count: reportScope.value.filter((i) => i.status === status).length,
+    }))
+  }
+  // 仅有根事项时：状态条按「根+子完成数」近似——子项未加载时把子完成计入 done，其余挂在根状态上
+  return STATUS_ORDER.map((status) => {
+    const rootCount = rootIssues.value.filter((i) => i.status === status).length
+    const extraDone =
+      status === "done"
+        ? rootIssues.value.reduce((s, i) => s + (i.childDoneCount || 0), 0)
+        : 0
+    return { status, label: STATUS_LABELS[status], count: rootCount + extraDone }
+  })
+})
+
+const reportByType = computed(() =>
+  buildRows(
+    loadedChildren.value.length > 0 ? reportScope.value : rootIssues.value,
+    (i) => i.type,
+    (key) => TYPE_LABELS[key] || key,
+  ),
+)
+
+const reportByModule = computed(() =>
+  buildRows(
+    loadedChildren.value.length > 0 ? reportScope.value : rootIssues.value,
+    (i) => i.moduleId || "",
+    (key, sample) => (key ? sample?.moduleName || modules.value.find((m) => m.id === key)?.name || "未命名模块" : "未归模块"),
+  ),
+)
+
+const reportByCycle = computed(() =>
+  buildRows(
+    loadedChildren.value.length > 0 ? reportScope.value : rootIssues.value,
+    (i) => i.cycleId || "",
+    (key, sample) => (key ? sample?.cycleName || cycles.value.find((c) => c.id === key)?.name || "未命名迭代" : "待办池"),
+  ),
+)
+
+function pct(part: number, total: number) {
+  if (!total) return 0
+  return Math.round((part / total) * 100)
+}
+
+async function exportReport() {
+  const p = project.value
+  if (!p) return
+  try {
+    await exportProjectReport({
+      projectKey: p.key,
+      projectName: p.name,
+      summary: reportSummary.value,
+      byStatus: reportByStatus.value.map((row) => ({
+        status: row.status,
+        label: row.label,
+        count: row.count,
+      })),
+      byType: reportByType.value,
+      byCycle: reportByCycle.value,
+      byModule: reportByModule.value,
+    })
+    toast.success("报表已导出")
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : "导出失败")
+  }
+}
+
+const columns = computed(() => {
+  const statuses =
+    statusFilter.value === "all"
+      ? [...STATUS_ORDER]
+      : STATUS_ORDER.filter((s) => s === statusFilter.value)
+  return statuses.map((status) => ({
     status,
     label: STATUS_LABELS[status],
     items: filtered.value.filter((i) => i.status === status),
-  })),
-)
+  }))
+})
+
+type TreeRow = {
+  issue: Issue
+  depth: number
+  hasChildren: boolean
+  expanded: boolean
+  childTotal: number
+  childDone: number
+}
+
+/** 树形：筛选后的根事项 + 其下全部子事项（便于看完成度） */
+const treeRows = computed((): TreeRow[] => {
+  const byParent = new Map<string, Issue[]>()
+  for (const it of issues.value) {
+    if (!it.parentId) continue
+    const list = byParent.get(it.parentId)
+    if (list) list.push(it)
+    else byParent.set(it.parentId, [it])
+  }
+  const rows: TreeRow[] = []
+  for (const root of filtered.value) {
+    const kids = byParent.get(root.id) || []
+    kids.sort((a, b) => a.number - b.number)
+    const childTotal = kids.length || root.childCount || 0
+    const childDone =
+      kids.length > 0 ? kids.filter((k) => k.status === "done").length : root.childDoneCount || 0
+    const hasChildren = childTotal > 0
+    const expanded = hasChildren && !treeCollapsed.value.has(root.id)
+    rows.push({
+      issue: root,
+      depth: 0,
+      hasChildren,
+      expanded,
+      childTotal,
+      childDone,
+    })
+    if (expanded) {
+      for (const child of kids) {
+        rows.push({
+          issue: child,
+          depth: 1,
+          hasChildren: false,
+          expanded: false,
+          childTotal: 0,
+          childDone: 0,
+        })
+      }
+    }
+  }
+  return rows
+})
+
+function toggleTreeRoot(id: string) {
+  const next = new Set(treeCollapsed.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  treeCollapsed.value = next
+}
+
+function childProgressPct(done: number, total: number) {
+  if (!total) return 0
+  return Math.round((done / total) * 100)
+}
 
 function defaultWeekRange() {
   const now = new Date()
@@ -223,18 +453,51 @@ function defaultWeekRange() {
   return { startDate: fmt(start), endDate: fmt(end) }
 }
 
+function syncPageHeader() {
+  const p = project.value
+  if (!p) return
+  pageHeader.set({
+    title: p.name,
+    badge: p.key,
+    subtitle: p.description || "",
+  })
+}
+
+function openEditProject() {
+  const p = project.value
+  if (!p) return
+  editForm.value = { name: p.name, description: p.description || "" }
+  editOpen.value = true
+}
+
+async function saveProject() {
+  const name = editForm.value.name.trim()
+  if (!name) {
+    toast.warning("项目名称不能为空")
+    return
+  }
+  editSaving.value = true
+  try {
+    const updated = await projectStore.updateProject({
+      name,
+      description: editForm.value.description.trim(),
+    })
+    projectsStore.upsert(updated)
+    syncPageHeader()
+    editOpen.value = false
+    toast.success("项目已更新")
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : "更新失败")
+  } finally {
+    editSaving.value = false
+  }
+}
+
 async function load() {
   const id = String(route.params.id)
   try {
     await projectStore.load(id)
-    const p = project.value
-    if (p) {
-      pageHeader.set({
-        title: p.name,
-        badge: p.key,
-        subtitle: p.description || "",
-      })
-    }
+    syncPageHeader()
     if (!form.value.assigneeId && auth.user?.id) {
       form.value.assigneeId = auth.user.id
     }
@@ -437,7 +700,7 @@ function onIssueUpdated(updated: Issue) {
 
 watch(view, (v) => {
   if (v === "modules") view.value = "board"
-  if (v === "board" || v === "list") workMode.value = v
+  if (v === "board" || v === "list" || v === "tree") workMode.value = v
 })
 
 function openIssueFromQuery() {
@@ -490,6 +753,12 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
               d="M8 1.5a6.5 6.5 0 1 0 6.2 8.3h-1.55A5 5 0 1 1 8 3v2.2L11.2 2.8 8 1.5z"
             />
           </svg>
+          <svg v-else-if="item.icon === 'reports'" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M2 13.5h12v1.2H2v-1.2zm1.2-1.8V7.2h1.6v4.5H3.2zm3.3 0V4.2h1.6v7.5H6.5zm3.3 0V5.8h1.6v5.9H9.8zm3.3 0V3h1.6v8.7h-1.6z"
+            />
+          </svg>
           <svg v-else-if="item.icon === 'attachments'" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
             <path
               fill="currentColor"
@@ -505,6 +774,9 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
           <span>{{ item.label }}</span>
         </button>
       </nav>
+      <div v-if="canManage" class="side-foot">
+        <NpButton size="sm" variant="ghost" block @click="openEditProject">编辑项目</NpButton>
+      </div>
     </aside>
 
     <section class="main">
@@ -536,6 +808,12 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
             <span class="filter-label">类型</span>
             <NpSelect v-model="typeFilter" size="sm">
               <option v-for="t in typeTabs" :key="t.value" :value="t.value">{{ t.label }}</option>
+            </NpSelect>
+          </div>
+          <div class="filter-group">
+            <span class="filter-label">状态</span>
+            <NpSelect v-model="statusFilter" size="sm">
+              <option v-for="t in statusTabs" :key="t.value" :value="t.value">{{ t.label }}</option>
             </NpSelect>
           </div>
         </div>
@@ -573,10 +851,25 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
             >
               <span>列表</span>
             </button>
+            <button
+              type="button"
+              class="view-btn"
+              :class="{ 'is-on': view === 'tree' }"
+              role="tab"
+              :aria-selected="view === 'tree'"
+              title="树形"
+              @click="view = 'tree'"
+            >
+              <span>树形</span>
+            </button>
           </div>
         </div>
 
-        <div v-if="view === 'board'" class="board">
+        <div
+          v-if="view === 'board'"
+          class="board"
+          :style="{ '--board-cols': String(columns.length) }"
+        >
           <section
             v-for="col in columns"
             :key="col.status"
@@ -617,6 +910,101 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
           </section>
         </div>
 
+        <div v-else-if="view === 'tree'" class="tree-wrap">
+          <div class="tree-head" aria-hidden="true">
+            <span class="tree-col tree-col--title">事项</span>
+            <span class="tree-col tree-col--progress">子项进度</span>
+            <span class="tree-col tree-col--status">状态</span>
+            <span class="tree-col tree-col--assignee">指派</span>
+          </div>
+          <ul class="tree-list" role="tree">
+            <li
+              v-for="row in treeRows"
+              :key="row.issue.id"
+              class="tree-row"
+              :class="[
+                `is-status-${row.issue.status}`,
+                {
+                  'is-root': row.depth === 0,
+                  'is-child': row.depth > 0,
+                  'is-done': row.issue.status === 'done',
+                },
+              ]"
+              role="treeitem"
+              :aria-expanded="row.hasChildren ? row.expanded : undefined"
+              :aria-level="row.depth + 1"
+              @click="openDetail(row.issue.id)"
+            >
+              <div class="tree-col tree-col--title" :style="{ paddingLeft: `${10 + row.depth * 22}px` }">
+                <button
+                  v-if="row.hasChildren"
+                  type="button"
+                  class="tree-toggle"
+                  :aria-label="row.expanded ? '折叠子事项' : '展开子事项'"
+                  @click.stop="toggleTreeRoot(row.issue.id)"
+                >
+                  <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                    <path
+                      fill="currentColor"
+                      :d="row.expanded ? 'M3.5 6.2 8 10.7l4.5-4.5z' : 'M6.2 3.5 10.7 8 6.2 12.5z'"
+                    />
+                  </svg>
+                </button>
+                <span v-else class="tree-toggle-spacer" aria-hidden="true" />
+                <span class="key">{{ row.issue.key }}</span>
+                <NpBadge :tone="typeTone(row.issue.type)">{{ TYPE_LABELS[row.issue.type] }}</NpBadge>
+                <span class="tree-title">{{ row.issue.title }}</span>
+              </div>
+              <div class="tree-col tree-col--progress">
+                <template v-if="row.depth === 0 && row.childTotal">
+                  <div
+                    class="tree-bar"
+                    :title="`${row.childDone}/${row.childTotal}`"
+                    role="progressbar"
+                    :aria-valuenow="childProgressPct(row.childDone, row.childTotal)"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                  >
+                    <span
+                      class="tree-bar__fill"
+                      :style="{ width: `${childProgressPct(row.childDone, row.childTotal)}%` }"
+                    />
+                  </div>
+                  <span class="tree-bar__label">{{ row.childDone }}/{{ row.childTotal }}</span>
+                </template>
+                <span v-else class="muted">—</span>
+              </div>
+              <div
+                class="tree-col tree-col--status"
+                :class="`status-select--${row.issue.status}`"
+                @click.stop
+              >
+                <NpSelect
+                  :model-value="row.issue.status"
+                  size="sm"
+                  :disabled="!canWrite"
+                  @update:model-value="moveIssue(row.issue.id, $event)"
+                >
+                  <option v-for="s in STATUS_ORDER" :key="s" :value="s">{{ STATUS_LABELS[s] }}</option>
+                </NpSelect>
+              </div>
+              <div class="tree-col tree-col--assignee">
+                <span class="tree-assignee">
+                  <UserAvatar
+                    v-if="row.issue.assigneeId"
+                    :name="memberById(row.issue.assigneeId)?.name || row.issue.assigneeName"
+                    :email="memberById(row.issue.assigneeId)?.email"
+                    :avatar-url="memberById(row.issue.assigneeId)?.avatarUrl"
+                    size="sm"
+                  />
+                  <span class="tree-assignee-name">{{ row.issue.assigneeName || "—" }}</span>
+                </span>
+              </div>
+            </li>
+          </ul>
+          <p v-if="!treeRows.length" class="muted empty">暂无事项</p>
+        </div>
+
         <div v-else class="table-wrap">
           <table class="table">
             <thead>
@@ -647,7 +1035,7 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
                 </td>
                 <td>{{ it.moduleName || "—" }}</td>
                 <td><NpBadge :tone="priorityTone(it.priority)">{{ PRIORITY_LABELS[it.priority] }}</NpBadge></td>
-                <td @click.stop>
+                <td class="status-cell" :class="`status-select--${it.status}`" @click.stop>
                   <NpSelect
                     :model-value="it.status"
                     size="sm"
@@ -687,24 +1075,26 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
               <td class="nowrap">{{ cy.startDate }} ~ {{ cy.endDate }}</td>
               <td class="goal-cell">{{ cy.goal || "—" }}</td>
               <td class="nowrap">{{ cy.doneCount }}/{{ cy.issueCount }}</td>
-              <td v-if="canWrite" class="actions-cell" @click.stop>
-                <NpButton size="sm" variant="ghost" @click="cycleFilter = cy.id; view = 'list'">查看事项</NpButton>
-                <NpButton
-                  v-if="cy.status !== 'active'"
-                  size="sm"
-                  variant="secondary"
-                  @click="setCycleStatus(cy, 'active')"
-                >
-                  设为进行中
-                </NpButton>
-                <NpButton
-                  v-if="cy.status !== 'closed'"
-                  size="sm"
-                  variant="ghost"
-                  @click="setCycleStatus(cy, 'closed')"
-                >
-                  结束
-                </NpButton>
+              <td v-if="canWrite" @click.stop>
+                <div class="actions-cell">
+                  <NpButton size="sm" variant="ghost" @click="cycleFilter = cy.id; view = 'list'">查看事项</NpButton>
+                  <NpButton
+                    v-if="cy.status !== 'active'"
+                    size="sm"
+                    variant="secondary"
+                    @click="setCycleStatus(cy, 'active')"
+                  >
+                    设为进行中
+                  </NpButton>
+                  <NpButton
+                    v-if="cy.status !== 'closed'"
+                    size="sm"
+                    variant="ghost"
+                    @click="setCycleStatus(cy, 'closed')"
+                  >
+                    结束
+                  </NpButton>
+                </div>
               </td>
             </tr>
           </tbody>
@@ -712,13 +1102,151 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
         <p v-if="!cycles.length" class="muted empty">还没有迭代。创建「本周迭代」后，把事项收进去推进。</p>
       </div>
 
-      <div v-else-if="view === 'attachments'" class="attachments-view">
+      <div v-else-if="view === 'reports'" class="reports">
+        <div class="toolbar">
+          <div class="title-row" />
+          <div class="toolbar-actions">
+            <NpButton
+              size="sm"
+              variant="secondary"
+              :disabled="!reportSummary.total"
+              @click="exportReport"
+            >
+              导出 Excel
+            </NpButton>
+          </div>
+        </div>
+        <div class="report-cards">
+          <div class="report-card">
+            <span class="report-card__label">全部事项</span>
+            <strong class="report-card__value">{{ reportSummary.total }}</strong>
+            <span class="report-card__hint">史诗 {{ reportSummary.roots }} · 子事项 {{ reportSummary.children }}</span>
+          </div>
+          <div class="report-card">
+            <span class="report-card__label">整体完成率</span>
+            <strong class="report-card__value">{{ reportSummary.rate }}%</strong>
+            <span class="report-card__hint">已完成 {{ reportSummary.done }} / {{ reportSummary.total }}</span>
+          </div>
+          <div class="report-card">
+            <span class="report-card__label">子事项完成</span>
+            <strong class="report-card__value">{{ reportSummary.childRate }}%</strong>
+            <span class="report-card__hint">{{ reportSummary.childDone }} / {{ reportSummary.children }}</span>
+          </div>
+          <div class="report-card">
+            <span class="report-card__label">进行中 / 待验收</span>
+            <strong class="report-card__value">{{ reportSummary.doing }} / {{ reportSummary.review }}</strong>
+            <span class="report-card__hint">待处理 {{ reportSummary.todo }} · 史诗完成 {{ reportSummary.rootDone }}</span>
+          </div>
+        </div>
+
+        <div class="report-panel">
+          <h3 class="report-title">状态分布</h3>
+          <div class="status-bars">
+            <div v-for="row in reportByStatus" :key="row.status" class="status-bar-row">
+              <span class="status-bar-label">{{ row.label }}</span>
+              <div class="status-bar-track" aria-hidden="true">
+                <div
+                  class="status-bar-fill"
+                  :class="`is-${row.status}`"
+                  :style="{ width: `${pct(row.count, reportSummary.total)}%` }"
+                />
+              </div>
+              <span class="status-bar-count">{{ row.count }} · {{ pct(row.count, reportSummary.total) }}%</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="report-grid">
+          <div class="report-panel">
+            <h3 class="report-title">按类型</h3>
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>类型</th>
+                    <th>总数</th>
+                    <th>已完成</th>
+                    <th>完成率</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in reportByType" :key="row.key">
+                    <td>{{ row.label }}</td>
+                    <td>{{ row.total }}</td>
+                    <td>{{ row.done }}</td>
+                    <td>{{ pct(row.done, row.total) }}%</td>
+                  </tr>
+                </tbody>
+              </table>
+              <p v-if="!reportByType.length" class="muted empty">暂无事项</p>
+            </div>
+          </div>
+
+          <div class="report-panel">
+            <h3 class="report-title">按迭代</h3>
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>迭代</th>
+                    <th>总数</th>
+                    <th>已完成</th>
+                    <th>完成率</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in reportByCycle" :key="row.key || 'backlog'">
+                    <td>{{ row.label }}</td>
+                    <td>{{ row.total }}</td>
+                    <td>{{ row.done }}</td>
+                    <td>{{ pct(row.done, row.total) }}%</td>
+                  </tr>
+                </tbody>
+              </table>
+              <p v-if="!reportByCycle.length" class="muted empty">暂无事项</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="report-panel">
+          <h3 class="report-title">按模块</h3>
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>模块</th>
+                  <th>总数</th>
+                  <th>待处理</th>
+                  <th>进行中</th>
+                  <th>待验收</th>
+                  <th>已完成</th>
+                  <th>完成率</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in reportByModule" :key="row.key || 'none'">
+                  <td>{{ row.label }}</td>
+                  <td>{{ row.total }}</td>
+                  <td>{{ row.todo }}</td>
+                  <td>{{ row.doing }}</td>
+                  <td>{{ row.review }}</td>
+                  <td>{{ row.done }}</td>
+                  <td>{{ pct(row.done, row.total) }}%</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-if="!reportByModule.length" class="muted empty">暂无事项</p>
+          </div>
+        </div>
+      </div>
+
+      <div v-else-if="view === 'files'" class="attachments-view">
         <ProjectAttachmentsPanel
           v-if="project"
           ref="attachmentsPanel"
           :project-id="project.id"
           :can-write="canWrite"
-          :active="view === 'attachments'"
+          :active="view === 'files'"
           @open-issue="openDetail"
           @changed="onProjectAttachmentsChanged"
         />
@@ -950,6 +1478,26 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
       </template>
     </NpModal>
 
+    <NpModal :open="editOpen" title="编辑项目" @close="editOpen = false">
+      <div class="form">
+        <NpField label="项目标识">
+          <NpInput :model-value="project?.key || ''" disabled />
+        </NpField>
+        <NpField label="项目名称">
+          <NpInput v-model="editForm.name" placeholder="项目名称" />
+        </NpField>
+        <NpField label="描述">
+          <NpTextarea v-model="editForm.description" placeholder="项目目标与范围" :rows="3" />
+        </NpField>
+      </div>
+      <template #footer>
+        <NpButton variant="ghost" @click="editOpen = false">取消</NpButton>
+        <NpButton variant="primary" :disabled="editSaving" @click="saveProject">
+          {{ editSaving ? "保存中…" : "保存" }}
+        </NpButton>
+      </template>
+    </NpModal>
+
     <IssueDetailDrawer
       :open="detailOpen"
       :issue-id="activeIssueId"
@@ -1004,6 +1552,12 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.side-foot {
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--np-border);
 }
 
 .side-item {
@@ -1220,7 +1774,7 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
 
 .board {
   display: grid;
-  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  grid-template-columns: repeat(var(--board-cols, 4), minmax(180px, 1fr));
   gap: 10px;
   align-items: start;
 }
@@ -1351,6 +1905,215 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   color: var(--np-accent-ink);
 }
 
+.tree-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+  overflow-x: auto;
+  border: 1px solid var(--np-border);
+  border-radius: var(--np-radius-md);
+  background: #fff;
+  padding: 10px 8px 4px;
+}
+
+.tree-head,
+.tree-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.6fr) minmax(120px, 0.7fr) 7.5rem minmax(88px, 0.55fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 560px;
+}
+
+.tree-head {
+  padding: 0 8px 8px;
+  border-bottom: 1px solid var(--np-border);
+  color: var(--np-text-muted);
+  font-size: var(--np-text-xs);
+  font-weight: 600;
+}
+
+.tree-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tree-row {
+  padding: 8px;
+  border-bottom: 1px solid var(--np-border);
+  box-shadow: inset 3px 0 0 transparent;
+  cursor: pointer;
+  transition:
+    background var(--np-duration-fast) var(--np-ease),
+    box-shadow var(--np-duration-fast) var(--np-ease);
+}
+
+.tree-row:hover {
+  background: color-mix(in srgb, var(--np-accent-muted) 45%, transparent);
+}
+
+.tree-row.is-root {
+  font-weight: 600;
+}
+
+.tree-row.is-child {
+  background: color-mix(in srgb, var(--np-bg-sunken) 35%, transparent);
+}
+
+.tree-row.is-child:hover {
+  background: color-mix(in srgb, var(--np-accent-muted) 40%, transparent);
+}
+
+.tree-row.is-done .tree-title {
+  color: var(--np-text-muted);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.tree-col {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tree-col--title {
+  overflow: hidden;
+}
+
+.tree-col--progress {
+  gap: 8px;
+}
+
+.tree-col--status :deep(.np-select) {
+  width: 100%;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.tree-row.is-status-todo {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--np-text-muted) 55%, var(--np-border));
+}
+
+.tree-row.is-status-doing {
+  box-shadow: inset 3px 0 0 var(--np-accent);
+}
+
+.tree-row.is-status-review {
+  box-shadow: inset 3px 0 0 var(--np-warning);
+}
+
+.tree-row.is-status-done {
+  box-shadow: inset 3px 0 0 var(--np-success);
+}
+
+.status-select--todo :deep(.np-select) {
+  color: var(--np-text-muted);
+  border-color: color-mix(in srgb, var(--np-text-muted) 35%, var(--np-border));
+  background-color: color-mix(in srgb, var(--np-bg-sunken) 70%, #fff);
+}
+
+.status-select--doing :deep(.np-select) {
+  color: var(--np-accent-ink);
+  border-color: color-mix(in srgb, var(--np-accent) 45%, var(--np-border));
+  background-color: color-mix(in srgb, var(--np-accent-muted) 75%, #fff);
+}
+
+.status-select--review :deep(.np-select) {
+  color: color-mix(in srgb, var(--np-warning) 75%, #000);
+  border-color: color-mix(in srgb, var(--np-warning) 45%, var(--np-border));
+  background-color: color-mix(in srgb, var(--np-warning-muted) 75%, #fff);
+}
+
+.status-select--done :deep(.np-select) {
+  color: color-mix(in srgb, var(--np-success) 70%, #000);
+  border-color: color-mix(in srgb, var(--np-success) 45%, var(--np-border));
+  background-color: color-mix(in srgb, var(--np-success-muted) 75%, #fff);
+}
+
+.status-cell :deep(.np-select) {
+  font-weight: 600;
+  min-width: 6.5rem;
+}
+
+.tree-toggle,
+.tree-toggle-spacer {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+}
+
+.tree-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--np-border);
+  border-radius: 4px;
+  background: var(--np-bg-elevated);
+  color: var(--np-text-muted);
+  cursor: pointer;
+}
+
+.tree-toggle:hover {
+  color: var(--np-accent);
+  border-color: color-mix(in srgb, var(--np-accent) 45%, var(--np-border));
+}
+
+.tree-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--np-text-sm);
+  font-weight: inherit;
+}
+
+.tree-bar {
+  flex: 1;
+  min-width: 48px;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--np-bg-sunken) 70%, #fff);
+  overflow: hidden;
+  border: 1px solid var(--np-border);
+}
+
+.tree-bar__fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--np-accent), color-mix(in srgb, var(--np-accent) 70%, #3d9a6a));
+  transition: width var(--np-duration-fast) var(--np-ease);
+}
+
+.tree-bar__label {
+  flex-shrink: 0;
+  font-family: var(--np-font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--np-accent-ink);
+}
+
+.tree-assignee {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tree-assignee-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--np-text-xs);
+  font-weight: 500;
+  color: var(--np-text-muted);
+}
+
 .module-tag {
   max-width: 7em;
   overflow: hidden;
@@ -1392,6 +2155,139 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   background: color-mix(in srgb, var(--np-accent-muted) 45%, transparent);
 }
 
+.reports {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.report-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.report-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--np-border);
+  border-radius: var(--np-radius-lg);
+  background: var(--np-bg-elevated);
+  box-shadow: var(--np-shadow-sm);
+}
+
+.report-card__label {
+  color: var(--np-text-muted);
+  font-size: var(--np-text-xs);
+  font-weight: 600;
+}
+
+.report-card__value {
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--np-text);
+}
+
+.report-card__hint {
+  color: var(--np-text-secondary);
+  font-size: var(--np-text-xs);
+}
+
+.report-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.report-panel {
+  padding: 14px 16px 16px;
+  border: 1px solid var(--np-border);
+  border-radius: var(--np-radius-lg);
+  background: var(--np-bg-elevated);
+  box-shadow: var(--np-shadow-sm);
+}
+
+.report-title {
+  margin: 0 0 12px;
+  font-size: var(--np-text-sm);
+  font-weight: 700;
+  color: var(--np-text);
+}
+
+.status-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.status-bar-row {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr) 5.5rem;
+  gap: 10px;
+  align-items: center;
+}
+
+.status-bar-label {
+  font-size: var(--np-text-sm);
+  color: var(--np-text-secondary);
+}
+
+.status-bar-track {
+  height: 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--np-border) 70%, #fff);
+  overflow: hidden;
+}
+
+.status-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--np-accent);
+  min-width: 0;
+  transition: width var(--np-duration-fast) var(--np-ease);
+}
+
+.status-bar-fill.is-todo {
+  background: color-mix(in srgb, var(--np-text-muted) 55%, #fff);
+}
+.status-bar-fill.is-doing {
+  background: var(--np-accent);
+}
+.status-bar-fill.is-review {
+  background: var(--np-warning);
+}
+.status-bar-fill.is-done {
+  background: var(--np-success);
+}
+
+.status-bar-count {
+  font-size: var(--np-text-xs);
+  color: var(--np-text-muted);
+  text-align: right;
+  white-space: nowrap;
+}
+
+@media (max-width: 960px) {
+  .report-cards,
+  .report-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .report-cards,
+  .report-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .status-bar-row {
+    grid-template-columns: 3.5rem minmax(0, 1fr) 4.8rem;
+  }
+}
+
 .table-wrap {
   overflow: auto;
   border: 1px solid var(--np-border);
@@ -1400,7 +2296,8 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   background: #fff;
 }
 
-.data-panel > .table-wrap {
+.data-panel > .table-wrap,
+.data-panel > .tree-wrap {
   margin-top: 2px;
 }
 

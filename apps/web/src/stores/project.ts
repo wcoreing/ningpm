@@ -55,7 +55,7 @@ export const useProjectStore = defineStore("project", () => {
     try {
       const [p, list, ms, cs, mds, us] = await Promise.all([
         api<Project>(`/api/projects/${id}`),
-        api<Issue[]>(`/api/issues?projectId=${id}`),
+        api<Issue[]>(`/api/issues?projectId=${id}&includeChildren=1`),
         api<ProjectMember[]>(`/api/projects/${id}/members`),
         api<Cycle[]>(`/api/projects/${id}/cycles`),
         api<Module[]>(`/api/projects/${id}/modules`),
@@ -166,6 +166,16 @@ export const useProjectStore = defineStore("project", () => {
     members.value = members.value.filter((m) => m.userId !== userId)
   }
 
+  async function updateProject(body: { name: string; description?: string }) {
+    if (!project.value) throw new Error("项目未加载")
+    const updated = await api<Project>(`/api/projects/${project.value.id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    })
+    project.value = { ...project.value, ...updated, myRole: project.value.myRole }
+    return project.value
+  }
+
   async function createCycle(body: {
     name: string
     goal?: string
@@ -237,6 +247,7 @@ export const useProjectStore = defineStore("project", () => {
     addMember,
     changeRole,
     removeMember,
+    updateProject,
     createCycle,
     setCycleStatus,
     setModules,

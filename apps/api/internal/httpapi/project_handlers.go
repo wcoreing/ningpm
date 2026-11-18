@@ -83,3 +83,45 @@ func (s *Server) handleGetProject(c *gin.Context) {
 	}
 	OK(c, p)
 }
+
+type updateProjectReq struct {
+	Name        *string `json:"name"`
+	Description *string `json:"description"`
+}
+
+func (s *Server) handleUpdateProject(c *gin.Context) {
+	id := c.Param("id")
+	if _, ok := s.requireManage(c, id); !ok {
+		return
+	}
+	p, err := s.store.GetProject(id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			Fail(c, http.StatusNotFound, "项目不存在")
+			return
+		}
+		Fail(c, http.StatusInternalServerError, "加载项目失败")
+		return
+	}
+	var req updateProjectReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, http.StatusBadRequest, "请求无效")
+		return
+	}
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			Fail(c, http.StatusBadRequest, "项目名称不能为空")
+			return
+		}
+		p.Name = name
+	}
+	if req.Description != nil {
+		p.Description = strings.TrimSpace(*req.Description)
+	}
+	if err := s.store.UpdateProject(p); err != nil {
+		Fail(c, http.StatusInternalServerError, "更新项目失败")
+		return
+	}
+	OK(c, p)
+}

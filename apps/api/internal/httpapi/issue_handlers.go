@@ -39,6 +39,9 @@ type updateStatusReq struct {
 }
 
 func (s *Server) handleListIssues(c *gin.Context) {
+	rootsQ := strings.ToLower(strings.TrimSpace(c.Query("rootsOnly")))
+	includeChildren := c.Query("includeChildren") == "1" || c.Query("includeChildren") == "true" ||
+		rootsQ == "0" || rootsQ == "false"
 	f := store.IssueFilter{
 		ProjectID:  c.Query("projectId"),
 		Type:       c.Query("type"),
@@ -47,13 +50,15 @@ func (s *Server) handleListIssues(c *gin.Context) {
 		CycleID:    c.Query("cycleId"),
 		ModuleID:   c.Query("moduleId"),
 		ParentID:   c.Query("parentId"),
-		RootsOnly:  c.Query("rootsOnly") == "1" || c.Query("rootsOnly") == "true",
+		RootsOnly:  rootsQ == "1" || rootsQ == "true",
 		Backlog:    c.Query("backlog") == "1" || c.Query("backlog") == "true",
 		UserID:     currentUserID(c),
 		MineOnly:   c.Query("mine") == "1" || c.Query("mine") == "true",
 	}
-	// 看板 / 全部事项默认只看根事项；显式 parentId 或我的待办则不过滤。
-	if f.ParentID == "" && !f.MineOnly && c.Query("rootsOnly") == "" {
+	// 看板默认只看根事项；includeChildren / rootsOnly=0 / 显式 parentId / 我的待办则不过滤。
+	if includeChildren {
+		f.RootsOnly = false
+	} else if f.ParentID == "" && !f.MineOnly && rootsQ == "" {
 		f.RootsOnly = true
 	}
 	if f.ProjectID != "" && !s.requireMembership(c, f.ProjectID) {

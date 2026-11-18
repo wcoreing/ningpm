@@ -30,11 +30,22 @@ export const useProjectsStore = defineStore("projects", () => {
     return p
   }
 
+  async function update(id: string, body: { name: string; description?: string }) {
+    const p = await api<Project>(`/api/projects/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    })
+    const prev = items.value.find((x) => x.id === id)
+    const next = { ...p, myRole: prev?.myRole || p.myRole, issueCount: prev?.issueCount ?? p.issueCount }
+    upsert(next)
+    return next
+  }
+
   function upsert(p: Project) {
     const i = items.value.findIndex((x) => x.id === p.id)
     if (i >= 0) items.value[i] = p
     else items.value = [p, ...items.value]
   }
 
-  return { items, loading, error, fetchAll, create, upsert }
+  return { items, loading, error, fetchAll, create, update, upsert }
 })

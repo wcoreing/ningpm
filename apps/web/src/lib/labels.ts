@@ -55,3 +55,17 @@ export function priorityTone(p: number): "danger" | "warning" | "neutral" | "suc
   if (p === 4) return "success"
   return "neutral"
 }
+
+/** 事项状态色：待处理灰 / 进行中蓝 / 待验收橙 / 已完成绿 */
+export function statusTone(status: string): "neutral" | "accent" | "warning" | "success" {
+  switch (status) {
+    case "doing":
+      return "accent"
+    case "review":
+      return "warning"
+    case "done":
+      return "success"
+    default:
+      return "neutral"
+  }
+}

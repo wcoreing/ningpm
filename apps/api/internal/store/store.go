@@ -587,10 +587,11 @@ func (s *Store) ensureDemoCycle() error {
 	return err
 }
 
-// SeedDemo creates default admin + sample project/issues when empty.
+// SeedDemo creates default admin + sample project/issues when admin is missing.
+// Open() may have already inserted invite-pool users, so we key off admin email—not empty table.
 func (s *Store) SeedDemo() error {
 	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(1) FROM users`).Scan(&n); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM users WHERE email = ?`, "admin@ningpm.local").Scan(&n); err != nil {
 		return err
 	}
 	if n > 0 {
@@ -921,6 +922,14 @@ FROM projects p WHERE `+pk+` = ?`, key)
 	}
 	p.CreatedAt, _ = time.Parse(time.RFC3339, created)
 	return &p, nil
+}
+
+func (s *Store) UpdateProject(p *project.Project) error {
+	_, err := s.db.Exec(
+		`UPDATE projects SET name = ?, description = ? WHERE id = ?`,
+		p.Name, p.Description, p.ID,
+	)
+	return err
 }
 
 // --- issues ---

@@ -52,6 +52,7 @@ func (s *Server) NewRouter() *gin.Engine {
 			authz.GET("/projects", s.handleListProjects)
 			authz.POST("/projects", s.handleCreateProject)
 			authz.GET("/projects/:id", s.handleGetProject)
+			authz.PATCH("/projects/:id", s.handleUpdateProject)
 			authz.GET("/projects/:id/members", s.handleListMembers)
 			authz.POST("/projects/:id/members", s.handleAddMember)
 			authz.PATCH("/projects/:id/members/:userId", s.handleUpdateMember)
@@ -63,6 +64,9 @@ func (s *Server) NewRouter() *gin.Engine {
 			authz.POST("/projects/:id/modules", s.handleCreateModule)
 			authz.DELETE("/projects/:id/modules/:moduleId", s.handleDeleteModule)
 			authz.GET("/projects/:id/attachments", s.handleListProjectAttachments)
+			authz.GET("/projects/:id/files", s.handleListProjectFiles)
+			authz.POST("/projects/:id/files", s.handleAddProjectFile)
+			authz.DELETE("/projects/:id/files/:fileId", s.handleRemoveProjectFile)
 
 			authz.GET("/issues", s.handleListIssues)
 			authz.POST("/issues", s.handleCreateIssue)

@@ -2,8 +2,9 @@
 import { onMounted, ref } from "vue"
 import { storeToRefs } from "pinia"
 import { useRouter } from "vue-router"
-import { NpBadge, NpButton, NpField, NpInput, NpModal, NpTextarea } from "@ningpm/ui"
+import { NpBadge, NpButton, NpField, NpInput, NpModal, NpTextarea, toast } from "@ningpm/ui"
 import { ROLE_LABELS } from "../lib/labels"
+import type { Project } from "../types"
 import { useProjectsStore } from "../stores/projects"
 
 const router = useRouter()
@@ -11,9 +12,17 @@ const projectsStore = useProjectsStore()
 const { items: projects, loading, error } = storeToRefs(projectsStore)
 
 const open = ref(false)
+const editOpen = ref(false)
 const saving = ref(false)
+const editSaving = ref(false)
 const formError = ref("")
 const form = ref({ key: "", name: "", description: "" })
+const editing = ref<Project | null>(null)
+const editForm = ref({ name: "", description: "" })
+
+function canEdit(p: Project) {
+  return p.myRole === "owner" || p.myRole === "admin"
+}
 
 async function createProject() {
   saving.value = true
@@ -27,6 +36,36 @@ async function createProject() {
     formError.value = e instanceof Error ? e.message : "创建失败"
   } finally {
     saving.value = false
+  }
+}
+
+function openEdit(p: Project) {
+  editing.value = p
+  editForm.value = { name: p.name, description: p.description || "" }
+  editOpen.value = true
+}
+
+async function saveProject() {
+  if (!editing.value) return
+  const name = editForm.value.name.trim()
+  if (!name) {
+    toast.warning("项目名称不能为空")
+    return
+  }
+  editSaving.value = true
+  formError.value = ""
+  try {
+    await projectsStore.update(editing.value.id, {
+      name,
+      description: editForm.value.description.trim(),
+    })
+    editOpen.value = false
+    editing.value = null
+    toast.success("项目已更新")
+  } catch (e) {
+    formError.value = e instanceof Error ? e.message : "更新失败"
+  } finally {
+    editSaving.value = false
   }
 }
 
@@ -56,6 +95,7 @@ onMounted(() => {
             <th>我的角色</th>
             <th>描述</th>
             <th class="num">事项</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -74,6 +114,17 @@ onMounted(() => {
             </td>
             <td class="desc">{{ p.description || "—" }}</td>
             <td class="num">{{ p.issueCount }}</td>
+            <td>
+              <NpButton
+                v-if="canEdit(p)"
+                size="sm"
+                variant="ghost"
+                @click.stop="openEdit(p)"
+              >
+                编辑
+              </NpButton>
+              <span v-else class="muted">—</span>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -99,6 +150,26 @@ onMounted(() => {
         <NpButton variant="ghost" @click="open = false">取消</NpButton>
         <NpButton variant="primary" :disabled="saving" @click="createProject">
           {{ saving ? "创建中…" : "创建" }}
+        </NpButton>
+      </template>
+    </NpModal>
+
+    <NpModal :open="editOpen" title="编辑项目" @close="editOpen = false">
+      <div class="form">
+        <NpField label="项目标识">
+          <NpInput :model-value="editing?.key || ''" disabled />
+        </NpField>
+        <NpField label="项目名称">
+          <NpInput v-model="editForm.name" placeholder="项目名称" />
+        </NpField>
+        <NpField label="描述">
+          <NpTextarea v-model="editForm.description" placeholder="项目目标与范围" :rows="3" />
+        </NpField>
+      </div>
+      <template #footer>
+        <NpButton variant="ghost" @click="editOpen = false">取消</NpButton>
+        <NpButton variant="primary" :disabled="editSaving" @click="saveProject">
+          {{ editSaving ? "保存中…" : "保存" }}
         </NpButton>
       </template>
     </NpModal>

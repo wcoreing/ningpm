@@ -41,6 +41,18 @@ func (s *Store) ensureResourceTables() error {
   FOREIGN KEY(created_by) REFERENCES users(id)
 )`, id, id, id, id, s.timeCol()),
 		`CREATE INDEX idx_issue_attachments_issue ON issue_attachments(issue_id, created_at)`,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS project_files (
+  id %s PRIMARY KEY,
+  project_id %s NOT NULL,
+  resource_id %s NOT NULL,
+  created_by %s NOT NULL,
+  created_at %s NOT NULL,
+  UNIQUE(project_id, resource_id),
+  FOREIGN KEY(project_id) REFERENCES projects(id),
+  FOREIGN KEY(resource_id) REFERENCES resources(id),
+  FOREIGN KEY(created_by) REFERENCES users(id)
+)`, id, id, id, id, s.timeCol()),
+		`CREATE INDEX idx_project_files_project ON project_files(project_id, created_at)`,
 	}
 	for _, stmt := range stmts {
 		if strings.HasPrefix(stmt, "CREATE INDEX") {
@@ -175,14 +187,17 @@ FROM resources WHERE id=?`, id)
 }
 
 func (s *Store) resourceRefCount(resourceID string) (int, error) {
-	var n1, n2 int
+	var n1, n2, n3 int
 	if err := s.db.QueryRow(`SELECT COUNT(1) FROM users WHERE avatar=?`, resourceID).Scan(&n1); err != nil {
 		return 0, err
 	}
 	if err := s.db.QueryRow(`SELECT COUNT(1) FROM issue_attachments WHERE resource_id=?`, resourceID).Scan(&n2); err != nil {
 		return 0, err
 	}
-	return n1 + n2, nil
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM project_files WHERE resource_id=?`, resourceID).Scan(&n3); err != nil {
+		return 0, err
+	}
+	return n1 + n2 + n3, nil
 }
 
 // DeleteResource removes DB row and file when no references remain.
@@ -221,6 +236,16 @@ func (s *Store) ResourceAccessInfo(resourceID string) (ResourceAccessFlags, []st
 	}
 	flags.AsAvatar = n > 0
 
+	seen := map[string]bool{}
+	var projects []string
+	appendProject := func(pid string) {
+		if pid == "" || seen[pid] {
+			return
+		}
+		seen[pid] = true
+		projects = append(projects, pid)
+	}
+
 	rows, err := s.db.Query(`
 SELECT DISTINCT i.project_id
 FROM issue_attachments a
@@ -229,16 +254,33 @@ WHERE a.resource_id = ?`, resourceID)
 	if err != nil {
 		return flags, nil, err
 	}
-	defer rows.Close()
-	var projects []string
 	for rows.Next() {
 		var pid string
 		if err := rows.Scan(&pid); err != nil {
+			rows.Close()
 			return flags, nil, err
 		}
-		projects = append(projects, pid)
+		appendProject(pid)
 	}
-	return flags, projects, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return flags, nil, err
+	}
+	rows.Close()
+
+	rows2, err := s.db.Query(`SELECT DISTINCT project_id FROM project_files WHERE resource_id = ?`, resourceID)
+	if err != nil {
+		return flags, nil, err
+	}
+	defer rows2.Close()
+	for rows2.Next() {
+		var pid string
+		if err := rows2.Scan(&pid); err != nil {
+			return flags, nil, err
+		}
+		appendProject(pid)
+	}
+	return flags, projects, rows2.Err()
 }
 
 // ForceDeleteResource deletes regardless of refs (caller must clear refs first).
@@ -251,6 +293,7 @@ func (s *Store) ForceDeleteResource(id string) error {
 		return err
 	}
 	_, _ = s.db.Exec(`DELETE FROM issue_attachments WHERE resource_id=?`, id)
+	_, _ = s.db.Exec(`DELETE FROM project_files WHERE resource_id=?`, id)
 	_, _ = s.db.Exec(`UPDATE users SET avatar='' WHERE avatar=?`, id)
 	if _, err := s.db.Exec(`DELETE FROM resources WHERE id=?`, id); err != nil {
 		return err
@@ -407,5 +450,100 @@ func (s *Store) DetachIssueAttachment(issueID, attachmentID string) error {
 		return sql.ErrNoRows
 	}
 	_ = s.DeleteResource(a.ResourceID)
+	return nil
+}
+
+// ListProjectFiles returns project-level materials, newest first.
+func (s *Store) ListProjectFiles(projectID string) ([]attachment.ProjectFile, error) {
+	rows, err := s.db.Query(`
+SELECT f.id, f.project_id, f.resource_id, r.original_name, r.content_type, r.size_bytes,
+       f.created_by, COALESCE(u.name,''), f.created_at
+FROM project_files f
+JOIN resources r ON r.id = f.resource_id
+LEFT JOIN users u ON u.id = f.created_by
+WHERE f.project_id = ?
+ORDER BY f.created_at DESC`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanProjectFiles(rows)
+}
+
+func scanProjectFiles(rows *sql.Rows) ([]attachment.ProjectFile, error) {
+	var out []attachment.ProjectFile
+	for rows.Next() {
+		var f attachment.ProjectFile
+		var created string
+		if err := rows.Scan(
+			&f.ID, &f.ProjectID, &f.ResourceID, &f.OriginalName, &f.ContentType, &f.SizeBytes,
+			&f.CreatedBy, &f.CreatorName, &created,
+		); err != nil {
+			return nil, err
+		}
+		f.URL = resource.PublicURL(f.ResourceID)
+		f.CreatedAt, _ = time.Parse(time.RFC3339, created)
+		out = append(out, f)
+	}
+	if out == nil {
+		out = []attachment.ProjectFile{}
+	}
+	return out, rows.Err()
+}
+
+// AttachResourceToProject links a resource as project material.
+func (s *Store) AttachResourceToProject(projectID, resourceID, createdBy string) (*attachment.ProjectFile, error) {
+	if _, err := s.GetResource(resourceID); err != nil {
+		return nil, err
+	}
+	id := uuid.NewString()
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(
+		`INSERT INTO project_files(id, project_id, resource_id, created_by, created_at) VALUES(?,?,?,?,?)`,
+		id, projectID, resourceID, createdBy, now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	list, err := s.ListProjectFiles(projectID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		if list[i].ID == id {
+			return &list[i], nil
+		}
+	}
+	return nil, sql.ErrNoRows
+}
+
+func (s *Store) GetProjectFile(projectID, fileID string) (*attachment.ProjectFile, error) {
+	list, err := s.ListProjectFiles(projectID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		if list[i].ID == fileID {
+			return &list[i], nil
+		}
+	}
+	return nil, sql.ErrNoRows
+}
+
+// DetachProjectFile removes a project material link and deletes orphan resource.
+func (s *Store) DetachProjectFile(projectID, fileID string) error {
+	f, err := s.GetProjectFile(projectID, fileID)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.Exec(`DELETE FROM project_files WHERE id=? AND project_id=?`, fileID, projectID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	_ = s.DeleteResource(f.ResourceID)
 	return nil
 }

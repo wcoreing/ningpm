@@ -13,6 +13,9 @@ export default defineConfig({
       "@ningpm/ui": fileURLToPath(new URL("../../packages/ui/src/index.ts", import.meta.url)),
     },
   },
+  optimizeDeps: {
+    include: ["exceljs"],
+  },
   server: {
     port: 5173,
     proxy: {
