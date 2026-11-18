@@ -112,7 +112,17 @@ sed -i "s/^NINGPM_VERSION=.*/NINGPM_VERSION=${VERSION}/" .env
 if [ "$SKIP_WEB" -eq 0 ]; then
   log "==> build web"
   need_cmd node
-  need_cmd pnpm || npm i -g pnpm@9
+  if ! command -v pnpm >/dev/null 2>&1; then
+    log "安装 pnpm（corepack / npm）"
+    if command -v corepack >/dev/null 2>&1; then
+      corepack enable || true
+      corepack prepare pnpm@9.15.9 --activate || true
+    fi
+    if ! command -v pnpm >/dev/null 2>&1; then
+      npm i -g pnpm@9
+    fi
+  fi
+  need_cmd pnpm
   export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
   pnpm install --frozen-lockfile || pnpm install
   pnpm --filter @ningpm/web exec vite build
