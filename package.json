@@ -1,0 +1,13 @@
+{
+  "name": "ningpm",
+  "private": true,
+  "version": "0.24.2",
+  "packageManager": "pnpm@11.28.5",
+  "scripts": {
+    "dev": "pnpm --filter @ningpm/web dev",
+    "dev:web": "pnpm --filter @ningpm/web dev",
+    "dev:api": "bash scripts/dev-api.sh",
+    "build": "pnpm --filter @ningpm/web build",
+    "build:ui": "pnpm --filter @ningpm/ui build"
+  }
+}

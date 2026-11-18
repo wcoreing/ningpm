@@ -1,0 +1,29 @@
+# ningpm on Wistop — API + SQLite 数据卷（数据库落在 Docker volume）
+# 用法（服务器 /www/wwwroot/ningpm）：
+#   cp deploy/.env.example .env   # 改 JWT
+#   docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+      args:
+        NINGPM_VERSION: ${NINGPM_VERSION:-0.24.2}
+    image: ningpm-api:${NINGPM_VERSION:-0.24.2}
+    container_name: ningpm-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8091:8080"
+    environment:
+      NINGPM_HTTP_ADDR: ":8080"
+      NINGPM_ENV: production
+      NINGPM_DB_PATH: /data/ningpm.db
+      NINGPM_JWT_SECRET: ${NINGPM_JWT_SECRET:?set NINGPM_JWT_SECRET in .env}
+      NINGPM_VERSION: ${NINGPM_VERSION:-0.24.2}
+    volumes:
+      - ningpm_data:/data
+
+volumes:
+  ningpm_data:
+    name: ningpm_data

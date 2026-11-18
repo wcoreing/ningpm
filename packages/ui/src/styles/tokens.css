@@ -1,0 +1,156 @@
+/**
+ * ningpm design tokens
+ * Direction: Ink Side + Soft Studio（深蓝灰侧栏 + 浅蓝工作室主区）
+ */
+:root {
+  /* Brand / signal — Element primary */
+  --np-accent: #409eff;
+  --np-accent-hover: #66b1ff;
+  --np-accent-active: #337ecc;
+  --np-accent-muted: color-mix(in srgb, var(--np-accent) 14%, transparent);
+  --np-accent-ink: #2b6cb0;
+
+  /* Shell — ink sidebar (not full dark mode) */
+  --np-shell-aside-bg: #1e293b;
+  --np-shell-aside-bg-soft: #243447;
+  --np-shell-aside-text: #f1f5f9;
+  --np-shell-aside-muted: #94a3b8;
+  --np-shell-aside-hover: rgb(255 255 255 / 7%);
+  --np-shell-aside-active: rgb(64 158 255 / 22%);
+  --np-shell-aside-border: rgb(148 163 184 / 18%);
+
+  /* Neutrals — Soft Studio workspace */
+  --np-bg: #e8f0f8;
+  --np-bg-elevated: #ffffff;
+  --np-bg-sunken: #d9e6f4;
+  --np-bg-inverse: #1e293b;
+  --np-border: #c5d6ea;
+  --np-border-strong: #9eb6d4;
+  --np-text: #1e293b;
+  --np-text-secondary: #475569;
+  --np-text-muted: #64748b;
+  --np-text-inverse: #ffffff;
+
+  /* Semantic — Element palette */
+  --np-danger: #f56c6c;
+  --np-danger-muted: color-mix(in srgb, var(--np-danger) 14%, transparent);
+  --np-warning: #e6a23c;
+  --np-warning-muted: color-mix(in srgb, var(--np-warning) 14%, transparent);
+  --np-success: #67c23a;
+  --np-success-muted: color-mix(in srgb, var(--np-success) 14%, transparent);
+  --np-info: #909399;
+  --np-info-muted: color-mix(in srgb, var(--np-info) 14%, transparent);
+
+  /* Geometry */
+  --np-radius-sm: 6px;
+  --np-radius-md: 8px;
+  --np-radius-lg: 12px;
+  --np-shadow-sm: 0 1px 2px rgb(30 41 59 / 6%);
+  --np-shadow-md: 0 10px 28px rgb(30 41 59 / 9%);
+
+  /* Type — Sora for display/Latin, Noto/PingFang for CJK */
+  --np-font-display: "Sora", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
+  --np-font-sans: "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Sora", sans-serif;
+  --np-font-mono: "IBM Plex Mono", "SF Mono", ui-monospace, monospace;
+  --np-text-xs: 12px;
+  --np-text-sm: 13px;
+  --np-text-md: 14px;
+  --np-text-lg: 16px;
+  --np-text-xl: 22px;
+  --np-text-2xl: 30px;
+  --np-leading: 1.5;
+  --np-tracking: 0;
+
+  /* Motion */
+  --np-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --np-duration-fast: 120ms;
+  --np-duration: 200ms;
+
+  /* Control sizes */
+  --np-control-h-sm: 28px;
+  --np-control-h-md: 36px;
+  --np-control-h-lg: 40px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: var(--np-font-sans);
+  font-size: var(--np-text-md);
+  line-height: var(--np-leading);
+  letter-spacing: var(--np-tracking);
+  color: var(--np-text);
+  background:
+    radial-gradient(980px 480px at -5% -8%, rgb(64 158 255 / 28%), transparent 55%),
+    radial-gradient(820px 420px at 105% 0%, rgb(30 64 120 / 10%), transparent 48%),
+    linear-gradient(165deg, #f4f8fd 0%, var(--np-bg) 38%, #e2ecf6 100%);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--np-accent);
+}
+
+a:hover {
+  color: var(--np-accent-hover);
+}
+
+/* Default data table — white card on studio bg */
+.table-wrap {
+  overflow: auto;
+  background: var(--np-bg-elevated);
+  border: 1px solid var(--np-border);
+  border-radius: var(--np-radius-lg);
+  box-shadow: var(--np-shadow-sm);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--np-bg-elevated);
+}
+
+.table th,
+.table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--np-border);
+  text-align: left;
+  font-size: var(--np-text-sm);
+  vertical-align: middle;
+  background: transparent;
+}
+
+.table thead th {
+  color: var(--np-accent-ink);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--np-accent-muted) 48%, var(--np-bg-elevated));
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table tbody tr:hover td {
+  background: color-mix(in srgb, var(--np-accent-muted) 35%, transparent);
+}

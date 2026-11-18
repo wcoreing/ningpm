@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1
+FROM golang:1.22-bookworm AS build
+WORKDIR /src
+COPY apps/api/go.mod apps/api/go.sum ./
+RUN go mod download
+COPY apps/api/ ./
+ARG NINGPM_VERSION=0.0.0
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o /out/ningpm-api ./cmd/server
+
+# 用 root 写 Docker volume 里的 SQLite（私有演示机够用）
+FROM gcr.io/distroless/static-debian12
+WORKDIR /app
+COPY --from=build /out/ningpm-api /app/ningpm-api
+ENV NINGPM_HTTP_ADDR=:8080 \
+    NINGPM_ENV=production \
+    NINGPM_DB_PATH=/data/ningpm.db
+EXPOSE 8080
+VOLUME ["/data"]
+ENTRYPOINT ["/app/ningpm-api"]
