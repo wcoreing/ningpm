@@ -13,7 +13,12 @@ import (
 func main() {
 	cfg := config.Load()
 
-	st, err := store.Open(cfg.DBPath)
+	st, err := store.Open(store.Options{
+		Driver:     cfg.DBDriver,
+		SQLitePath: cfg.DBPath,
+		MySQLDSN:   cfg.DBDSN,
+		FilesDir:   cfg.FilesDir,
+	})
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
@@ -29,7 +34,11 @@ func main() {
 	srv := httpapi.NewServer(cfg, st, jwt)
 	r := srv.NewRouter()
 
-	log.Printf("ningpm api %s listening on %s (%s) db=%s", version.Number, cfg.HTTPAddr, cfg.Env, cfg.DBPath)
+	dbInfo := cfg.DBPath
+	if cfg.DBDriver == "mysql" {
+		dbInfo = "mysql"
+	}
+	log.Printf("ningpm api %s listening on %s (%s) driver=%s db=%s", version.Number, cfg.HTTPAddr, cfg.Env, cfg.DBDriver, dbInfo)
 	if err := r.Run(cfg.HTTPAddr); err != nil {
 		log.Fatal(err)
 	}

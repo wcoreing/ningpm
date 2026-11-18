@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
@@ -23,28 +24,82 @@ import (
 	"github.com/ningpm/ningpm/apps/api/internal/domain/user"
 )
 
-// Store is the SQLite persistence layer.
+// Options configures persistence.
+type Options struct {
+	Driver     string // sqlite | mysql
+	SQLitePath string
+	MySQLDSN   string
+	FilesDir   string
+}
+
+// Store is the SQL persistence layer (sqlite locally, mysql in production).
 type Store struct {
 	db       *sql.DB
+	driver   string
 	filesDir string
 }
 
-// Open opens (or creates) the SQLite database and migrates schema.
-func Open(path string) (*Store, error) {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
+// Open opens the database and migrates schema.
+func Open(opt Options) (*Store, error) {
+	driver := strings.ToLower(strings.TrimSpace(opt.Driver))
+	if driver == "" {
+		driver = "sqlite"
 	}
-	filesDir := filepath.Join(dir, "files")
+	filesDir := strings.TrimSpace(opt.FilesDir)
+	if filesDir == "" {
+		if driver == "mysql" {
+			filesDir = filepath.Join("data", "files")
+		} else {
+			filesDir = filepath.Join(filepath.Dir(opt.SQLitePath), "files")
+		}
+	}
 	if err := os.MkdirAll(filesDir, 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
+
+	var (
+		db  *sql.DB
+		err error
+	)
+	switch driver {
+	case "mysql":
+		if strings.TrimSpace(opt.MySQLDSN) == "" {
+			return nil, fmt.Errorf("NINGPM_DB_DSN required for mysql")
+		}
+		dsn := opt.MySQLDSN
+		if !strings.Contains(dsn, "multiStatements=") {
+			if strings.Contains(dsn, "?") {
+				dsn += "&multiStatements=true"
+			} else {
+				dsn += "?multiStatements=true"
+			}
+		}
+		db, err = sql.Open("mysql", dsn)
+		if err != nil {
+			return nil, err
+		}
+		db.SetMaxOpenConns(20)
+		db.SetMaxIdleConns(5)
+		db.SetConnMaxLifetime(time.Hour)
+	case "sqlite":
+		dir := filepath.Dir(opt.SQLitePath)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+		db, err = sql.Open("sqlite", opt.SQLitePath)
+		if err != nil {
+			return nil, err
+		}
+		db.SetMaxOpenConns(1)
+	default:
+		return nil, fmt.Errorf("unsupported db driver: %s", driver)
+	}
+
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	s := &Store{db: db, filesDir: filesDir}
+	s := &Store{db: db, driver: driver, filesDir: filesDir}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -217,55 +272,49 @@ func (s *Store) ensureIssueParentColumn() error {
 	return s.ensureIssueColumn("parent_id")
 }
 
-func (s *Store) ensureUserAvatarColumn() error {
-	rows, err := s.db.Query(`PRAGMA table_info(users)`)
+func (s *Store) hasColumn(table, col string) (bool, error) {
+	if s.driver == "mysql" {
+		var n int
+		err := s.db.QueryRow(
+			`SELECT COUNT(1) FROM information_schema.COLUMNS
+			 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+			table, col,
+		).Scan(&n)
+		return n > 0, err
+	}
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer rows.Close()
-	has := false
 	for rows.Next() {
 		var cid int
 		var name, ctype string
 		var notnull, pk int
 		var dflt sql.NullString
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return err
+			return false, err
 		}
-		if name == "avatar" {
-			has = true
-			break
+		if name == col {
+			return true, nil
 		}
 	}
-	if has {
-		return rows.Err()
+	return false, rows.Err()
+}
+
+func (s *Store) ensureUserAvatarColumn() error {
+	has, err := s.hasColumn("users", "avatar")
+	if err != nil || has {
+		return err
 	}
 	_, err = s.db.Exec(`ALTER TABLE users ADD COLUMN avatar TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
 func (s *Store) ensureIssueColumn(col string) error {
-	rows, err := s.db.Query(`PRAGMA table_info(issues)`)
-	if err != nil {
+	has, err := s.hasColumn("issues", col)
+	if err != nil || has {
 		return err
-	}
-	has := false
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, pk int
-		var dflt sql.NullString
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		if name == col {
-			has = true
-		}
-	}
-	_ = rows.Close()
-	if has {
-		return nil
 	}
 	_, err = s.db.Exec(`ALTER TABLE issues ADD COLUMN ` + col + ` TEXT`)
 	return err
