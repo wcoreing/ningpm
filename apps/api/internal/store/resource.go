@@ -16,23 +16,24 @@ import (
 )
 
 func (s *Store) ensureResourceTables() error {
-	_, err := s.db.Exec(`
+	id := s.idType()
+	_, err := s.db.Exec(fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS resources (
-  id TEXT PRIMARY KEY,
+  id %s PRIMARY KEY,
   storage_key TEXT NOT NULL,
   original_name TEXT NOT NULL,
   content_type TEXT NOT NULL,
   size_bytes INTEGER NOT NULL,
-  uploader_id TEXT NOT NULL,
+  uploader_id %s NOT NULL,
   created_at TEXT NOT NULL,
   FOREIGN KEY(uploader_id) REFERENCES users(id)
 );
 CREATE INDEX IF NOT EXISTS idx_resources_uploader ON resources(uploader_id, created_at);
 CREATE TABLE IF NOT EXISTS issue_attachments (
-  id TEXT PRIMARY KEY,
-  issue_id TEXT NOT NULL,
-  resource_id TEXT NOT NULL,
-  created_by TEXT NOT NULL,
+  id %s PRIMARY KEY,
+  issue_id %s NOT NULL,
+  resource_id %s NOT NULL,
+  created_by %s NOT NULL,
   created_at TEXT NOT NULL,
   UNIQUE(issue_id, resource_id),
   FOREIGN KEY(issue_id) REFERENCES issues(id),
@@ -40,7 +41,7 @@ CREATE TABLE IF NOT EXISTS issue_attachments (
   FOREIGN KEY(created_by) REFERENCES users(id)
 );
 CREATE INDEX IF NOT EXISTS idx_issue_attachments_issue ON issue_attachments(issue_id, created_at);
-`)
+`, id, id, id, id, id, id))
 	return err
 }
 
@@ -282,10 +283,11 @@ func (s *Store) ClearUserAvatarResource(userID string) (*user.User, error) {
 }
 
 func (s *Store) ListIssueAttachments(issueID string) ([]attachment.IssueAttachment, error) {
+	issueKey := s.sqlConcat(s.projectKeyCol("p"), "'-'", "i.number")
 	rows, err := s.db.Query(`
 SELECT a.id, a.issue_id, a.resource_id, r.original_name, r.content_type, r.size_bytes,
        a.created_by, COALESCE(u.name,''), a.created_at,
-       p.key || '-' || i.number, i.title
+       `+issueKey+`, i.title
 FROM issue_attachments a
 JOIN resources r ON r.id = a.resource_id
 JOIN issues i ON i.id = a.issue_id
@@ -302,10 +304,11 @@ ORDER BY a.created_at ASC`, issueID)
 
 // ListProjectAttachments returns all attachments under a project, newest first.
 func (s *Store) ListProjectAttachments(projectID string) ([]attachment.IssueAttachment, error) {
+	issueKey := s.sqlConcat(s.projectKeyCol("p"), "'-'", "i.number")
 	rows, err := s.db.Query(`
 SELECT a.id, a.issue_id, a.resource_id, r.original_name, r.content_type, r.size_bytes,
        a.created_by, COALESCE(u.name,''), a.created_at,
-       p.key || '-' || i.number, i.title
+       `+issueKey+`, i.title
 FROM issue_attachments a
 JOIN resources r ON r.id = a.resource_id
 JOIN issues i ON i.id = a.issue_id

@@ -112,51 +112,89 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// idType is VARCHAR on MySQL (TEXT cannot be PRIMARY KEY without length).
+func (s *Store) idType() string {
+	if s.driver == "mysql" {
+		return "VARCHAR(64)"
+	}
+	return "TEXT"
+}
+
+// projectKeyCol returns a qualified projects.key reference that is safe on MySQL.
+func (s *Store) projectKeyCol(alias string) string {
+	if alias == "" {
+		if s.driver == "mysql" {
+			return "`key`"
+		}
+		return "key"
+	}
+	if s.driver == "mysql" {
+		return alias + ".`key`"
+	}
+	return alias + ".key"
+}
+
+// sqlConcat joins SQL expressions with || (sqlite) or CONCAT (mysql).
+func (s *Store) sqlConcat(parts ...string) string {
+	if len(parts) == 0 {
+		return "''"
+	}
+	if s.driver == "mysql" {
+		return "CONCAT(" + strings.Join(parts, ", ") + ")"
+	}
+	return strings.Join(parts, " || ")
+}
+
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(`
+	id := s.idType()
+	keyCol := "key"
+	if s.driver == "mysql" {
+		keyCol = "`key`"
+	}
+	_, err := s.db.Exec(fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS users (
-  id TEXT PRIMARY KEY,
+  id %s PRIMARY KEY,
   name TEXT NOT NULL,
-  email TEXT NOT NULL UNIQUE,
+  email %s NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS projects (
-  id TEXT PRIMARY KEY,
-  key TEXT NOT NULL UNIQUE,
+  id %s PRIMARY KEY,
+  %s %s NOT NULL UNIQUE,
   name TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
-  creator_id TEXT NOT NULL,
+  creator_id %s NOT NULL,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS issues (
-  id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL,
+  id %s PRIMARY KEY,
+  project_id %s NOT NULL,
   number INTEGER NOT NULL,
   type TEXT NOT NULL,
   title TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,
   priority INTEGER NOT NULL DEFAULT 3,
-  assignee_id TEXT,
-  creator_id TEXT NOT NULL,
+  assignee_id %s NULL,
+  creator_id %s NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(project_id, number),
   FOREIGN KEY(project_id) REFERENCES projects(id)
 );
 CREATE TABLE IF NOT EXISTS comments (
-  id TEXT PRIMARY KEY,
-  issue_id TEXT NOT NULL,
-  author_id TEXT NOT NULL,
+  id %s PRIMARY KEY,
+  issue_id %s NOT NULL,
+  author_id %s NOT NULL,
   body TEXT NOT NULL,
   created_at TEXT NOT NULL,
   FOREIGN KEY(issue_id) REFERENCES issues(id)
 );
 CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_id, created_at);
 CREATE TABLE IF NOT EXISTS project_members (
-  project_id TEXT NOT NULL,
-  user_id TEXT NOT NULL,
+  project_id %s NOT NULL,
+  user_id %s NOT NULL,
   role TEXT NOT NULL,
   joined_at TEXT NOT NULL,
   PRIMARY KEY(project_id, user_id),
@@ -164,8 +202,8 @@ CREATE TABLE IF NOT EXISTS project_members (
   FOREIGN KEY(user_id) REFERENCES users(id)
 );
 CREATE TABLE IF NOT EXISTS cycles (
-  id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL,
+  id %s PRIMARY KEY,
+  project_id %s NOT NULL,
   name TEXT NOT NULL,
   goal TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,
@@ -176,12 +214,12 @@ CREATE TABLE IF NOT EXISTS cycles (
 );
 CREATE INDEX IF NOT EXISTS idx_cycles_project ON cycles(project_id, status);
 CREATE TABLE IF NOT EXISTS modules (
-  id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL,
+  id %s PRIMARY KEY,
+  project_id %s NOT NULL,
   name TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,
-  lead_id TEXT,
+  lead_id %s NULL,
   start_date TEXT NOT NULL DEFAULT '',
   target_date TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
@@ -189,23 +227,32 @@ CREATE TABLE IF NOT EXISTS modules (
 );
 CREATE INDEX IF NOT EXISTS idx_modules_project ON modules(project_id, status);
 CREATE TABLE IF NOT EXISTS notifications (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  actor_id TEXT NOT NULL,
+  id %s PRIMARY KEY,
+  user_id %s NOT NULL,
+  actor_id %s NOT NULL,
   kind TEXT NOT NULL,
-  issue_id TEXT NOT NULL,
-  project_id TEXT NOT NULL,
+  issue_id %s NOT NULL,
+  project_id %s NOT NULL,
   body TEXT NOT NULL DEFAULT '',
-  read_at TEXT,
+  read_at TEXT NULL,
   created_at TEXT NOT NULL,
   FOREIGN KEY(user_id) REFERENCES users(id),
   FOREIGN KEY(actor_id) REFERENCES users(id),
   FOREIGN KEY(issue_id) REFERENCES issues(id),
   FOREIGN KEY(project_id) REFERENCES projects(id)
 );
-CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, read_at);
-`)
+`,
+		id, id, // users
+		id, keyCol, id, id, // projects
+		id, id, id, id, // issues
+		id, id, id, // comments
+		id, id, // project_members
+		id, id, // cycles
+		id, id, id, // modules
+		id, id, id, id, id, // notifications
+	))
 	if err != nil {
 		return err
 	}
@@ -307,7 +354,7 @@ func (s *Store) ensureUserAvatarColumn() error {
 	if err != nil || has {
 		return err
 	}
-	_, err = s.db.Exec(`ALTER TABLE users ADD COLUMN avatar TEXT NOT NULL DEFAULT ''`)
+	_, err = s.db.Exec(`ALTER TABLE users ADD COLUMN avatar ` + s.idType() + ` NOT NULL DEFAULT ''`)
 	return err
 }
 
@@ -316,14 +363,14 @@ func (s *Store) ensureIssueColumn(col string) error {
 	if err != nil || has {
 		return err
 	}
-	_, err = s.db.Exec(`ALTER TABLE issues ADD COLUMN ` + col + ` TEXT`)
+	_, err = s.db.Exec(`ALTER TABLE issues ADD COLUMN ` + col + ` ` + s.idType() + ` NULL`)
 	return err
 }
 
 // ensureDemoModules seeds Plane-style / 禅道-style product modules.
 func (s *Store) ensureDemoModules() error {
 	var projectID, adminID string
-	err := s.db.QueryRow(`SELECT id, creator_id FROM projects WHERE key = 'DEMO'`).Scan(&projectID, &adminID)
+	err := s.db.QueryRow(`SELECT id, creator_id FROM projects WHERE `+s.projectKeyCol("")+` = 'DEMO'`).Scan(&projectID, &adminID)
 	if err == sql.ErrNoRows {
 		return nil
 	}
@@ -408,7 +455,7 @@ WHERE NOT EXISTS (SELECT 1 FROM project_members m WHERE m.project_id = p.id)`)
 // ensureDemoMembers adds the demo PM account into DEMO when both exist.
 func (s *Store) ensureDemoMembers() error {
 	var projectID string
-	err := s.db.QueryRow(`SELECT id FROM projects WHERE key = 'DEMO'`).Scan(&projectID)
+	err := s.db.QueryRow(`SELECT id FROM projects WHERE ` + s.projectKeyCol("") + ` = 'DEMO'`).Scan(&projectID)
 	if err == sql.ErrNoRows {
 		return nil
 	}
@@ -466,7 +513,7 @@ func (s *Store) ensureDemoInvitePool() error {
 // ensureDemoCycle creates an active “本周迭代” for DEMO if missing.
 func (s *Store) ensureDemoCycle() error {
 	var projectID string
-	err := s.db.QueryRow(`SELECT id FROM projects WHERE key = 'DEMO'`).Scan(&projectID)
+	err := s.db.QueryRow(`SELECT id FROM projects WHERE ` + s.projectKeyCol("") + ` = 'DEMO'`).Scan(&projectID)
 	if err == sql.ErrNoRows {
 		return nil
 	}
@@ -535,7 +582,7 @@ func (s *Store) SeedDemo() error {
 
 	projID := uuid.NewString()
 	if _, err := s.db.Exec(
-		`INSERT INTO projects(id, key, name, description, creator_id, created_at) VALUES(?,?,?,?,?,?)`,
+		`INSERT INTO projects(id, `+s.projectKeyCol("")+`, name, description, creator_id, created_at) VALUES(?,?,?,?,?,?)`,
 		projID, "DEMO", "演示项目", "借鉴禅道术语与 Plane 交互的示例项目", adminID, now.Format(time.RFC3339),
 	); err != nil {
 		return err
@@ -767,7 +814,7 @@ func (s *Store) CreateProject(p *project.Project) error {
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.Exec(
-		`INSERT INTO projects(id, key, name, description, creator_id, created_at) VALUES(?,?,?,?,?,?)`,
+		`INSERT INTO projects(id, `+s.projectKeyCol("")+`, name, description, creator_id, created_at) VALUES(?,?,?,?,?,?)`,
 		p.ID, p.Key, p.Name, p.Description, p.CreatorID, p.CreatedAt.Format(time.RFC3339),
 	); err != nil {
 		return err
@@ -782,8 +829,9 @@ func (s *Store) CreateProject(p *project.Project) error {
 }
 
 func (s *Store) ListProjects(userID string) ([]project.Project, error) {
+	pk := s.projectKeyCol("p")
 	rows, err := s.db.Query(`
-SELECT p.id, p.key, p.name, p.description, p.creator_id, p.created_at,
+SELECT p.id, `+pk+`, p.name, p.description, p.creator_id, p.created_at,
        (SELECT COUNT(1) FROM issues i WHERE i.project_id = p.id) AS issue_count,
        m.role
 FROM projects p
@@ -807,8 +855,9 @@ ORDER BY p.created_at DESC`, userID)
 }
 
 func (s *Store) GetProject(id string) (*project.Project, error) {
+	pk := s.projectKeyCol("p")
 	row := s.db.QueryRow(`
-SELECT p.id, p.key, p.name, p.description, p.creator_id, p.created_at,
+SELECT p.id, `+pk+`, p.name, p.description, p.creator_id, p.created_at,
        (SELECT COUNT(1) FROM issues i WHERE i.project_id = p.id) AS issue_count
 FROM projects p WHERE p.id = ?`, id)
 	var p project.Project
@@ -821,10 +870,11 @@ FROM projects p WHERE p.id = ?`, id)
 }
 
 func (s *Store) GetProjectByKey(key string) (*project.Project, error) {
+	pk := s.projectKeyCol("p")
 	row := s.db.QueryRow(`
-SELECT p.id, p.key, p.name, p.description, p.creator_id, p.created_at,
+SELECT p.id, `+pk+`, p.name, p.description, p.creator_id, p.created_at,
        (SELECT COUNT(1) FROM issues i WHERE i.project_id = p.id) AS issue_count
-FROM projects p WHERE p.key = ?`, key)
+FROM projects p WHERE `+pk+` = ?`, key)
 	var p project.Project
 	var created string
 	if err := row.Scan(&p.ID, &p.Key, &p.Name, &p.Description, &p.CreatorID, &created, &p.IssueCount); err != nil {
@@ -885,12 +935,15 @@ func (s *Store) CreateIssue(it *issue.Issue) error {
 	return s.hydrateIssue(it)
 }
 
-const issueSelectSQL = `
-SELECT i.id, i.project_id, p.key, p.name, i.number, i.type, i.title, i.description, i.status, i.priority,
+func (s *Store) issueSelectSQL() string {
+	pk := s.projectKeyCol("p")
+	parentKey := s.sqlConcat(pk, "'-'", "pi.number")
+	return `
+SELECT i.id, i.project_id, ` + pk + `, p.name, i.number, i.type, i.title, i.description, i.status, i.priority,
        COALESCE(i.assignee_id, ''), COALESCE(u.name, ''), COALESCE(i.cycle_id, ''), COALESCE(c.name, ''),
        COALESCE(i.module_id, ''), COALESCE(m.name, ''),
        COALESCE(i.parent_id, ''),
-       CASE WHEN pi.id IS NULL THEN '' ELSE p.key || '-' || pi.number END,
+       CASE WHEN pi.id IS NULL THEN '' ELSE ` + parentKey + ` END,
        i.creator_id, i.created_at, i.updated_at,
        (SELECT COUNT(1) FROM issues ch WHERE ch.parent_id = i.id),
        (SELECT COUNT(1) FROM issues ch WHERE ch.parent_id = i.id AND ch.status = 'done'),
@@ -901,9 +954,10 @@ LEFT JOIN users u ON u.id = i.assignee_id
 LEFT JOIN cycles c ON c.id = i.cycle_id
 LEFT JOIN modules m ON m.id = i.module_id
 LEFT JOIN issues pi ON pi.id = i.parent_id`
+}
 
 func (s *Store) ListIssues(f IssueFilter) ([]issue.Issue, error) {
-	q := issueSelectSQL + `
+	q := s.issueSelectSQL() + `
 WHERE 1=1`
 	args := []any{}
 	if f.UserID != "" {
@@ -968,7 +1022,7 @@ WHERE 1=1`
 }
 
 func (s *Store) GetIssue(id string) (*issue.Issue, error) {
-	row := s.db.QueryRow(issueSelectSQL+` WHERE i.id = ?`, id)
+	row := s.db.QueryRow(s.issueSelectSQL()+` WHERE i.id = ?`, id)
 	return scanIssueRow(row)
 }
 
@@ -1451,9 +1505,10 @@ func (s *Store) ListNotifications(userID string, limit int) ([]notification.Noti
 	if limit <= 0 || limit > 100 {
 		limit = 40
 	}
+	issueKey := s.sqlConcat(s.projectKeyCol("p"), "'-'", "i.number")
 	rows, err := s.db.Query(`
 SELECT n.id, n.user_id, n.actor_id, COALESCE(a.name, ''), n.kind, n.issue_id,
-       p.key || '-' || i.number, i.title, n.project_id, p.name, n.body, n.read_at, n.created_at
+       `+issueKey+`, i.title, n.project_id, p.name, n.body, n.read_at, n.created_at
 FROM notifications n
 JOIN users a ON a.id = n.actor_id
 JOIN issues i ON i.id = n.issue_id
@@ -1541,7 +1596,7 @@ func (s *Store) ensureDemoNotifications() error {
 	if err != nil {
 		return err
 	}
-	err = s.db.QueryRow(`SELECT id FROM projects WHERE key = 'DEMO'`).Scan(&projectID)
+	err = s.db.QueryRow(`SELECT id FROM projects WHERE ` + s.projectKeyCol("") + ` = 'DEMO'`).Scan(&projectID)
 	if err == sql.ErrNoRows {
 		return nil
 	}
@@ -1581,7 +1636,7 @@ func (s *Store) ensureDemoNotifications() error {
 // ensureDemoSubIssues seeds one-level children under a DEMO story/task.
 func (s *Store) ensureDemoSubIssues() error {
 	var projectID, adminID, parentID string
-	err := s.db.QueryRow(`SELECT id, creator_id FROM projects WHERE key = 'DEMO'`).Scan(&projectID, &adminID)
+	err := s.db.QueryRow(`SELECT id, creator_id FROM projects WHERE ` + s.projectKeyCol("") + ` = 'DEMO'`).Scan(&projectID, &adminID)
 	if err == sql.ErrNoRows {
 		return nil
 	}
