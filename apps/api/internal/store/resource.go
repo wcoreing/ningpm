@@ -25,21 +25,21 @@ func (s *Store) ensureResourceTables() error {
   content_type TEXT NOT NULL,
   size_bytes INTEGER NOT NULL,
   uploader_id %s NOT NULL,
-  created_at TEXT NOT NULL,
+  created_at %s NOT NULL,
   FOREIGN KEY(uploader_id) REFERENCES users(id)
-)`, id, id),
+)`, id, id, s.timeCol()),
 		`CREATE INDEX idx_resources_uploader ON resources(uploader_id, created_at)`,
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS issue_attachments (
   id %s PRIMARY KEY,
   issue_id %s NOT NULL,
   resource_id %s NOT NULL,
   created_by %s NOT NULL,
-  created_at TEXT NOT NULL,
+  created_at %s NOT NULL,
   UNIQUE(issue_id, resource_id),
   FOREIGN KEY(issue_id) REFERENCES issues(id),
   FOREIGN KEY(resource_id) REFERENCES resources(id),
   FOREIGN KEY(created_by) REFERENCES users(id)
-)`, id, id, id, id),
+)`, id, id, id, id, s.timeCol()),
 		`CREATE INDEX idx_issue_attachments_issue ON issue_attachments(issue_id, created_at)`,
 	}
 	for _, stmt := range stmts {
