@@ -153,6 +153,19 @@ func (s *Store) sqlConcat(parts ...string) string {
 	return strings.Join(parts, " || ")
 }
 
+func (s *Store) execIgnoreDup(sqlStmt string) error {
+	_, err := s.db.Exec(sqlStmt)
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(err.Error())
+	// MySQL 1061 duplicate key / index; sqlite already has IF NOT EXISTS
+	if strings.Contains(msg, "duplicate") || strings.Contains(msg, "already exists") {
+		return nil
+	}
+	return err
+}
+
 func (s *Store) migrate() error {
 	id := s.idType()
 	td := s.textDef()
@@ -160,23 +173,23 @@ func (s *Store) migrate() error {
 	if s.driver == "mysql" {
 		keyCol = "`key`"
 	}
-	_, err := s.db.Exec(fmt.Sprintf(`
-CREATE TABLE IF NOT EXISTS users (
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS users (
   id %s PRIMARY KEY,
   name TEXT NOT NULL,
   email %s NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS projects (
+)`, id, id),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS projects (
   id %s PRIMARY KEY,
   %s %s NOT NULL UNIQUE,
   name TEXT NOT NULL,
   description %s,
   creator_id %s NOT NULL,
   created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS issues (
+)`, id, keyCol, id, td, id),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS issues (
   id %s PRIMARY KEY,
   project_id %s NOT NULL,
   number INTEGER NOT NULL,
@@ -191,17 +204,17 @@ CREATE TABLE IF NOT EXISTS issues (
   updated_at TEXT NOT NULL,
   UNIQUE(project_id, number),
   FOREIGN KEY(project_id) REFERENCES projects(id)
-);
-CREATE TABLE IF NOT EXISTS comments (
+)`, id, id, td, id, id),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS comments (
   id %s PRIMARY KEY,
   issue_id %s NOT NULL,
   author_id %s NOT NULL,
   body TEXT NOT NULL,
   created_at TEXT NOT NULL,
   FOREIGN KEY(issue_id) REFERENCES issues(id)
-);
-CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_id, created_at);
-CREATE TABLE IF NOT EXISTS project_members (
+)`, id, id, id),
+		`CREATE INDEX idx_comments_issue ON comments(issue_id, created_at)`,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS project_members (
   project_id %s NOT NULL,
   user_id %s NOT NULL,
   role TEXT NOT NULL,
@@ -209,8 +222,8 @@ CREATE TABLE IF NOT EXISTS project_members (
   PRIMARY KEY(project_id, user_id),
   FOREIGN KEY(project_id) REFERENCES projects(id),
   FOREIGN KEY(user_id) REFERENCES users(id)
-);
-CREATE TABLE IF NOT EXISTS cycles (
+)`, id, id),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS cycles (
   id %s PRIMARY KEY,
   project_id %s NOT NULL,
   name TEXT NOT NULL,
@@ -220,9 +233,9 @@ CREATE TABLE IF NOT EXISTS cycles (
   end_date TEXT NOT NULL,
   created_at TEXT NOT NULL,
   FOREIGN KEY(project_id) REFERENCES projects(id)
-);
-CREATE INDEX IF NOT EXISTS idx_cycles_project ON cycles(project_id, status);
-CREATE TABLE IF NOT EXISTS modules (
+)`, id, id, td),
+		`CREATE INDEX idx_cycles_project ON cycles(project_id, status)`,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS modules (
   id %s PRIMARY KEY,
   project_id %s NOT NULL,
   name TEXT NOT NULL,
@@ -233,9 +246,9 @@ CREATE TABLE IF NOT EXISTS modules (
   target_date %s,
   created_at TEXT NOT NULL,
   FOREIGN KEY(project_id) REFERENCES projects(id)
-);
-CREATE INDEX IF NOT EXISTS idx_modules_project ON modules(project_id, status);
-CREATE TABLE IF NOT EXISTS notifications (
+)`, id, id, td, id, td, td),
+		`CREATE INDEX idx_modules_project ON modules(project_id, status)`,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS notifications (
   id %s PRIMARY KEY,
   user_id %s NOT NULL,
   actor_id %s NOT NULL,
@@ -249,21 +262,20 @@ CREATE TABLE IF NOT EXISTS notifications (
   FOREIGN KEY(actor_id) REFERENCES users(id),
   FOREIGN KEY(issue_id) REFERENCES issues(id),
   FOREIGN KEY(project_id) REFERENCES projects(id)
-);
-CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, read_at);
-`,
-		id, id, // users
-		id, keyCol, id, td, id, // projects
-		id, id, td, id, id, // issues
-		id, id, id, // comments
-		id, id, // project_members
-		id, id, td, // cycles
-		id, id, td, id, td, td, // modules
-		id, id, id, id, id, td, // notifications
-	))
-	if err != nil {
-		return err
+)`, id, id, id, id, id, td),
+		`CREATE INDEX idx_notifications_user ON notifications(user_id, created_at)`,
+		`CREATE INDEX idx_notifications_unread ON notifications(user_id, read_at)`,
+	}
+	for _, stmt := range stmts {
+		if strings.HasPrefix(stmt, "CREATE INDEX") {
+			if err := s.execIgnoreDup(stmt); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := s.db.Exec(stmt); err != nil {
+			return err
+		}
 	}
 	if err := s.ensureIssueCycleColumn(); err != nil {
 		return err

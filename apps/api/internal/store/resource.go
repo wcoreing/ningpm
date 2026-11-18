@@ -17,8 +17,8 @@ import (
 
 func (s *Store) ensureResourceTables() error {
 	id := s.idType()
-	_, err := s.db.Exec(fmt.Sprintf(`
-CREATE TABLE IF NOT EXISTS resources (
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS resources (
   id %s PRIMARY KEY,
   storage_key TEXT NOT NULL,
   original_name TEXT NOT NULL,
@@ -27,9 +27,9 @@ CREATE TABLE IF NOT EXISTS resources (
   uploader_id %s NOT NULL,
   created_at TEXT NOT NULL,
   FOREIGN KEY(uploader_id) REFERENCES users(id)
-);
-CREATE INDEX IF NOT EXISTS idx_resources_uploader ON resources(uploader_id, created_at);
-CREATE TABLE IF NOT EXISTS issue_attachments (
+)`, id, id),
+		`CREATE INDEX idx_resources_uploader ON resources(uploader_id, created_at)`,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS issue_attachments (
   id %s PRIMARY KEY,
   issue_id %s NOT NULL,
   resource_id %s NOT NULL,
@@ -39,10 +39,21 @@ CREATE TABLE IF NOT EXISTS issue_attachments (
   FOREIGN KEY(issue_id) REFERENCES issues(id),
   FOREIGN KEY(resource_id) REFERENCES resources(id),
   FOREIGN KEY(created_by) REFERENCES users(id)
-);
-CREATE INDEX IF NOT EXISTS idx_issue_attachments_issue ON issue_attachments(issue_id, created_at);
-`, id, id, id, id, id, id))
-	return err
+)`, id, id, id, id),
+		`CREATE INDEX idx_issue_attachments_issue ON issue_attachments(issue_id, created_at)`,
+	}
+	for _, stmt := range stmts {
+		if strings.HasPrefix(stmt, "CREATE INDEX") {
+			if err := s.execIgnoreDup(stmt); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := s.db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ClearLegacyAvatarFiles wipes non-resource avatar filenames and removes old avatars dir files.
