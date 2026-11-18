@@ -169,6 +169,29 @@ func (s *Store) sqlConcat(parts ...string) string {
 	return strings.Join(parts, " || ")
 }
 
+// insertIgnoreSQL builds INSERT IGNORE / INSERT OR IGNORE for column list like `t(a,b)`.
+func (s *Store) insertIgnoreSQL(tableCols string) string {
+	placeholders := "?"
+	// count commas in "a,b,c" portion
+	n := 1
+	if i := strings.IndexByte(tableCols, '('); i >= 0 {
+		inner := tableCols[i+1:]
+		if j := strings.IndexByte(inner, ')'); j >= 0 {
+			inner = inner[:j]
+		}
+		if strings.TrimSpace(inner) != "" {
+			n = strings.Count(inner, ",") + 1
+		}
+	}
+	for i := 1; i < n; i++ {
+		placeholders += ",?"
+	}
+	if s.driver == "mysql" {
+		return "INSERT IGNORE INTO " + tableCols + " VALUES(" + placeholders + ")"
+	}
+	return "INSERT OR IGNORE INTO " + tableCols + " VALUES(" + placeholders + ")"
+}
+
 func (s *Store) execIgnoreDup(sqlStmt string) error {
 	_, err := s.db.Exec(sqlStmt)
 	if err == nil {
@@ -482,7 +505,7 @@ WHERE NOT EXISTS (SELECT 1 FROM project_members m WHERE m.project_id = p.id)`)
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, p := range pending {
 		if _, err := s.db.Exec(
-			`INSERT OR IGNORE INTO project_members(project_id, user_id, role, joined_at) VALUES(?,?,?,?)`,
+			s.insertIgnoreSQL(`project_members(project_id, user_id, role, joined_at)`),
 			p.projectID, p.creatorID, member.RoleOwner, now,
 		); err != nil {
 			return err
@@ -510,7 +533,7 @@ func (s *Store) ensureDemoMembers() error {
 		return err
 	}
 	_, err = s.db.Exec(
-		`INSERT OR IGNORE INTO project_members(project_id, user_id, role, joined_at) VALUES(?,?,?,?)`,
+		s.insertIgnoreSQL(`project_members(project_id, user_id, role, joined_at)`),
 		projectID, pmID, member.RoleMember, time.Now().UTC().Format(time.RFC3339),
 	)
 	return err
