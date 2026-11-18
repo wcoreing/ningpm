@@ -136,6 +136,14 @@ func (s *Store) timeCol() string {
 	return "TEXT"
 }
 
+// shortCol is for status/type/role/kind values that may appear in indexes.
+func (s *Store) shortCol() string {
+	if s.driver == "mysql" {
+		return "VARCHAR(32)"
+	}
+	return "TEXT"
+}
+
 // projectKeyCol returns a qualified projects.key reference that is safe on MySQL.
 func (s *Store) projectKeyCol(alias string) string {
 	if alias == "" {
@@ -178,6 +186,7 @@ func (s *Store) migrate() error {
 	id := s.idType()
 	td := s.textDef()
 	tm := s.timeCol()
+	sh := s.shortCol()
 	keyCol := "key"
 	if s.driver == "mysql" {
 		keyCol = "`key`"
@@ -202,10 +211,10 @@ func (s *Store) migrate() error {
   id %s PRIMARY KEY,
   project_id %s NOT NULL,
   number INTEGER NOT NULL,
-  type TEXT NOT NULL,
+  type %s NOT NULL,
   title TEXT NOT NULL,
   description %s,
-  status TEXT NOT NULL,
+  status %s NOT NULL,
   priority INTEGER NOT NULL DEFAULT 3,
   assignee_id %s NULL,
   creator_id %s NOT NULL,
@@ -213,7 +222,7 @@ func (s *Store) migrate() error {
   updated_at %s NOT NULL,
   UNIQUE(project_id, number),
   FOREIGN KEY(project_id) REFERENCES projects(id)
-)`, id, id, td, id, id, tm, tm),
+)`, id, id, sh, td, sh, id, id, tm, tm),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS comments (
   id %s PRIMARY KEY,
   issue_id %s NOT NULL,
@@ -226,42 +235,42 @@ func (s *Store) migrate() error {
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS project_members (
   project_id %s NOT NULL,
   user_id %s NOT NULL,
-  role TEXT NOT NULL,
+  role %s NOT NULL,
   joined_at %s NOT NULL,
   PRIMARY KEY(project_id, user_id),
   FOREIGN KEY(project_id) REFERENCES projects(id),
   FOREIGN KEY(user_id) REFERENCES users(id)
-)`, id, id, tm),
+)`, id, id, sh, tm),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS cycles (
   id %s PRIMARY KEY,
   project_id %s NOT NULL,
   name TEXT NOT NULL,
   goal %s,
-  status TEXT NOT NULL,
+  status %s NOT NULL,
   start_date %s NOT NULL,
   end_date %s NOT NULL,
   created_at %s NOT NULL,
   FOREIGN KEY(project_id) REFERENCES projects(id)
-)`, id, id, td, tm, tm, tm),
+)`, id, id, td, sh, tm, tm, tm),
 		`CREATE INDEX idx_cycles_project ON cycles(project_id, status)`,
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS modules (
   id %s PRIMARY KEY,
   project_id %s NOT NULL,
   name TEXT NOT NULL,
   description %s,
-  status TEXT NOT NULL,
+  status %s NOT NULL,
   lead_id %s NULL,
   start_date %s,
   target_date %s,
   created_at %s NOT NULL,
   FOREIGN KEY(project_id) REFERENCES projects(id)
-)`, id, id, td, id, td, td, tm),
+)`, id, id, td, sh, id, td, td, tm),
 		`CREATE INDEX idx_modules_project ON modules(project_id, status)`,
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS notifications (
   id %s PRIMARY KEY,
   user_id %s NOT NULL,
   actor_id %s NOT NULL,
-  kind TEXT NOT NULL,
+  kind %s NOT NULL,
   issue_id %s NOT NULL,
   project_id %s NOT NULL,
   body %s,
@@ -271,7 +280,7 @@ func (s *Store) migrate() error {
   FOREIGN KEY(actor_id) REFERENCES users(id),
   FOREIGN KEY(issue_id) REFERENCES issues(id),
   FOREIGN KEY(project_id) REFERENCES projects(id)
-)`, id, id, id, id, id, td, tm, tm),
+)`, id, id, id, sh, id, id, td, tm, tm),
 		`CREATE INDEX idx_notifications_user ON notifications(user_id, created_at)`,
 		`CREATE INDEX idx_notifications_unread ON notifications(user_id, read_at)`,
 	}
