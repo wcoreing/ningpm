@@ -526,7 +526,12 @@ func (s *Store) ensureUserAccountColumn() error {
 		return err
 	}
 	if !has {
-		if _, err := s.db.Exec(`ALTER TABLE users ADD COLUMN account TEXT NOT NULL DEFAULT ''`); err != nil {
+		// MySQL forbids DEFAULT on TEXT; use VARCHAR for login ids (also index-friendly).
+		col := "TEXT NOT NULL DEFAULT ''"
+		if s.driver == "mysql" {
+			col = "VARCHAR(191) NOT NULL DEFAULT ''"
+		}
+		if _, err := s.db.Exec(`ALTER TABLE users ADD COLUMN account ` + col); err != nil {
 			return err
 		}
 	}
