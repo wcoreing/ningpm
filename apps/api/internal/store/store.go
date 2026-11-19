@@ -1687,7 +1687,9 @@ func nullStr(s string) any {
 
 func (s *Store) ListComments(issueID string) ([]comment.Comment, error) {
 	rows, err := s.db.Query(`
-SELECT c.id, c.issue_id, c.author_id, COALESCE(u.name, ''), c.body, c.created_at
+SELECT c.id, c.issue_id, c.author_id, COALESCE(u.name, ''),
+  COALESCE(NULLIF(u.account,''), COALESCE(u.email,'')), COALESCE(u.avatar,''),
+  c.body, c.created_at
 FROM comments c
 LEFT JOIN users u ON u.id = c.author_id
 WHERE c.issue_id = ?
@@ -1700,9 +1702,12 @@ ORDER BY c.created_at ASC`, issueID)
 	var out []comment.Comment
 	for rows.Next() {
 		var cm comment.Comment
-		var created string
-		if err := rows.Scan(&cm.ID, &cm.IssueID, &cm.AuthorID, &cm.AuthorName, &cm.Body, &created); err != nil {
+		var created, avatar string
+		if err := rows.Scan(&cm.ID, &cm.IssueID, &cm.AuthorID, &cm.AuthorName, &cm.AuthorAccount, &avatar, &cm.Body, &created); err != nil {
 			return nil, err
+		}
+		if strings.TrimSpace(avatar) != "" {
+			cm.AuthorAvatarURL = "/api/avatars/" + cm.AuthorID
 		}
 		cm.CreatedAt, _ = time.Parse(time.RFC3339, created)
 		out = append(out, cm)
@@ -1727,6 +1732,11 @@ func (s *Store) CreateComment(issueID, authorID, body string) (*comment.Comment,
 	u, err := s.GetUserByID(authorID)
 	if err == nil {
 		cm.AuthorName = u.Name
+		cm.AuthorAccount = u.Account
+		if cm.AuthorAccount == "" {
+			cm.AuthorAccount = u.Email
+		}
+		cm.AuthorAvatarURL = u.AvatarURL()
 	}
 	_, _ = s.db.Exec(`UPDATE issues SET updated_at=? WHERE id=?`, cm.CreatedAt.Format(time.RFC3339), issueID)
 	return cm, nil

@@ -104,12 +104,10 @@ function goSide(value: (typeof sideItems)[number]["value"]) {
   }
   view.value = value
 }
-const open = ref(false)
 const cycleOpen = ref(false)
 const editOpen = ref(false)
 const editSaving = ref(false)
 const editForm = ref({ name: "", description: "" })
-const saving = ref(false)
 const detailOpen = ref(false)
 const activeIssueId = ref<string | null>(null)
 const memberSaving = ref(false)
@@ -120,15 +118,6 @@ const inviteOpen = ref(false)
 const addRole = ref("member")
 const inviteHint = ref("")
 const inviteRoot = ref<HTMLElement | null>(null)
-const form = ref({
-  type: "task",
-  title: "",
-  description: "",
-  priority: "3",
-  assigneeId: "",
-  cycleId: "",
-  moduleId: "",
-})
 const cycleForm = ref({
   name: "",
   goal: "",
@@ -672,12 +661,6 @@ async function load() {
   try {
     await projectStore.load(id)
     syncPageHeader()
-    if (!form.value.assigneeId && auth.user?.id) {
-      form.value.assigneeId = auth.user.id
-    }
-    if (!form.value.cycleId && activeCycle.value) {
-      form.value.cycleId = activeCycle.value.id
-    }
   } catch {
     /* error already on store */
   }
@@ -768,27 +751,14 @@ async function removeMember(userId: string) {
   }
 }
 
-async function createIssue() {
-  saving.value = true
-  try {
-    await projectStore.createIssue({
-      type: form.value.type,
-      title: form.value.title,
-      description: form.value.description,
-      priority: Number(form.value.priority),
-      assigneeId: form.value.assigneeId || undefined,
-      cycleId: form.value.cycleId || undefined,
-      moduleId: form.value.moduleId || undefined,
-      status: "todo",
-    })
-    open.value = false
-    form.value.title = ""
-    form.value.description = ""
-  } catch (e) {
-    toast.error(e instanceof Error ? e.message : "创建失败")
-  } finally {
-    saving.value = false
-  }
+function openCreate() {
+  activeIssueId.value = null
+  detailOpen.value = true
+}
+
+function onIssueCreated(issue: Issue) {
+  projectStore.upsertIssue(issue)
+  activeIssueId.value = issue.id
 }
 
 function openCreateCycle() {
@@ -1146,7 +1116,7 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
                 </NpSelect>
               </div>
             </div>
-            <NpButton size="sm" variant="primary" :disabled="!canWrite" @click="open = true">
+            <NpButton size="sm" variant="primary" :disabled="!canWrite" @click="openCreate">
               新建事项
             </NpButton>
           </div>
@@ -1823,65 +1793,6 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
       </template>
     </section>
 
-    <NpModal :open="open" title="新建事项" @close="open = false">
-      <div class="form">
-        <div class="form-row">
-          <NpField label="类型">
-            <NpSelect v-model="form.type">
-              <option value="story">需求</option>
-              <option value="task">任务</option>
-              <option value="bug">缺陷</option>
-              <option value="epic">史诗</option>
-            </NpSelect>
-          </NpField>
-          <NpField label="优先级">
-            <NpSelect v-model="form.priority">
-              <option value="1">紧急</option>
-              <option value="2">高</option>
-              <option value="3">中</option>
-              <option value="4">低</option>
-            </NpSelect>
-          </NpField>
-        </div>
-        <NpField label="标题">
-          <NpInput v-model="form.title" placeholder="一句话说清楚要做什么" />
-        </NpField>
-        <NpField label="描述">
-          <NpTextarea v-model="form.description" placeholder="背景、验收标准、复现步骤…" />
-        </NpField>
-        <NpField label="指派给">
-          <NpSelect v-model="form.assigneeId">
-            <option value="">未指派</option>
-            <option v-for="u in memberUsers" :key="u.id" :value="u.id">{{ u.name }}</option>
-          </NpSelect>
-        </NpField>
-        <NpField label="所属迭代">
-          <NpSelect v-model="form.cycleId">
-            <option value="">待规划</option>
-            <option v-for="cy in cycles" :key="cy.id" :value="cy.id">
-              {{ cy.name }}（{{ CYCLE_STATUS_LABELS[cy.status] }}）
-            </option>
-          </NpSelect>
-        </NpField>
-        <NpField label="模块标签">
-          <ModuleTagPicker
-            v-if="project"
-            :project-id="project.id"
-            :modules="modules"
-            v-model="form.moduleId"
-            :can-write="canWrite"
-            @update:modules="onModulesUpdated"
-          />
-        </NpField>
-      </div>
-      <template #footer>
-        <NpButton variant="ghost" @click="open = false">取消</NpButton>
-        <NpButton variant="primary" :disabled="saving" @click="createIssue">
-          {{ saving ? "提交中…" : "创建" }}
-        </NpButton>
-      </template>
-    </NpModal>
-
     <NpModal :open="cycleOpen" title="新建迭代" @close="cycleOpen = false">
       <div class="form">
         <NpField label="名称">
@@ -1942,8 +1853,12 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
       :cycles="cycles"
       :modules="modules"
       :can-write="canWrite"
+      :default-assignee-id="auth.user?.id || ''"
+      :default-cycle-id="activeCycle?.id || ''"
+      :default-module-id="moduleFilter !== 'all' ? moduleFilter : ''"
       @close="detailOpen = false"
       @updated="onIssueUpdated"
+      @created="onIssueCreated"
       @open-issue="openDetail"
       @update:modules="onModulesUpdated"
     />

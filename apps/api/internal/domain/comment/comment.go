@@ -6,8 +6,10 @@ import "time"
 type Comment struct {
 	ID         string    `json:"id"`
 	IssueID    string    `json:"issueId"`
-	AuthorID   string    `json:"authorId"`
-	AuthorName string    `json:"authorName"`
-	Body       string    `json:"body"`
+	AuthorID        string    `json:"authorId"`
+	AuthorName      string    `json:"authorName"`
+	AuthorAccount   string    `json:"authorAccount,omitempty"`
+	AuthorAvatarURL string    `json:"authorAvatarUrl,omitempty"`
+	Body            string    `json:"body"`
 	CreatedAt  time.Time `json:"createdAt"`
 }

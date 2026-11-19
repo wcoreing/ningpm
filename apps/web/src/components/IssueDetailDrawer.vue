@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue"
-import { NpBadge, NpButton, NpDrawer, NpField, NpInput, NpSelect, NpTextarea, toast } from "@ningpm/ui"
+import { computed, onUnmounted, ref, watch } from "vue"
+import { NpBadge, NpButton, NpDrawer, NpField, NpInput, NpSelect, NpTabs, NpTextarea, toast } from "@ningpm/ui"
 import { api } from "../lib/api"
 import { fileKindLabel, previewKind } from "../lib/preview"
 import {
@@ -21,12 +21,15 @@ import {
 import type { Cycle, Issue, Module, UserOption } from "../types"
 import AttachmentPreviewDialog from "./AttachmentPreviewDialog.vue"
 import ModuleTagPicker from "./ModuleTagPicker.vue"
+import UserAvatar from "./UserAvatar.vue"
 
 export type IssueComment = {
   id: string
   issueId: string
   authorId: string
   authorName: string
+  authorAccount?: string
+  authorAvatarUrl?: string
   body: string
   createdAt: string
 }
@@ -52,15 +55,20 @@ const props = defineProps<{
   cycles?: Cycle[]
   modules?: Module[]
   canWrite?: boolean
+  defaultAssigneeId?: string
+  defaultCycleId?: string
+  defaultModuleId?: string
 }>()
 
 const emit = defineEmits<{
   close: []
   updated: [issue: Issue]
+  created: [issue: Issue]
   "open-issue": [issueId: string]
   "update:modules": [modules: Module[]]
 }>()
 
+const tab = ref("feed")
 const loading = ref(false)
 const saving = ref(false)
 const commenting = ref(false)
@@ -75,6 +83,9 @@ const draft = ref("")
 const childTitle = ref("")
 const childType = ref("task")
 const fileInput = ref<HTMLInputElement | null>(null)
+const dropHot = ref(false)
+type PendingFile = { id: string; file: File; name: string; preview?: string }
+const pending = ref<PendingFile[]>([])
 const previewDialog = ref<{ show: (o: { name: string; url: string; contentType?: string }) => Promise<void>; close: () => void } | null>(null)
 const thumbUrls = ref<Record<string, string>>({})
 
@@ -128,8 +139,18 @@ const form = ref({
   dueDate: "",
 })
 
-const open = computed(() => props.open && Boolean(props.issueId))
+const isCreate = computed(() => props.open && !props.issueId)
+const open = computed(() => props.open && (Boolean(props.issueId) || isCreate.value))
 const isRoot = computed(() => Boolean(issue.value) && !issue.value?.parentId)
+const feedbackCount = computed(() => {
+  const kids = !isCreate.value && isRoot.value ? children.value.length : 0
+  const notes = isCreate.value ? 0 : comments.value.length
+  return kids + attachments.value.length + pending.value.length + notes
+})
+const tabItems = computed(() => [
+  { value: "base", label: "基础" },
+  { value: "feed", label: feedbackCount.value ? `反馈 · ${feedbackCount.value}` : "反馈" },
+])
 const childProgress = computed(() => {
   const total = children.value.length
   const done = children.value.filter((c) => c.status === "done").length
@@ -236,8 +257,97 @@ async function patchChild(child: Issue, patch: { status?: string; assigneeId?: s
   }
 }
 
+function blankForm() {
+  return {
+    title: "",
+    description: "",
+    type: "task",
+    status: "todo",
+    priority: "3",
+    assigneeId: props.defaultAssigneeId || "",
+    cycleId: props.defaultCycleId || "",
+    moduleId: props.defaultModuleId || "",
+    startDate: "",
+    dueDate: "",
+  }
+}
+
+function clearPending() {
+  for (const p of pending.value) {
+    if (p.preview) URL.revokeObjectURL(p.preview)
+  }
+  pending.value = []
+}
+
+function resetCreate() {
+  tab.value = "base"
+  issue.value = null
+  comments.value = []
+  attachments.value = []
+  children.value = []
+  draft.value = ""
+  error.value = ""
+  clearPending()
+  form.value = blankForm()
+}
+
 async function save() {
-  if (!props.issueId) return
+  if (props.canWrite === false) return
+  if (!form.value.title.trim()) {
+    tab.value = "base"
+    toast.warning("标题不能为空")
+    return
+  }
+  if (!props.issueId) {
+    if (!props.projectId) {
+      toast.error("未选择项目")
+      return
+    }
+    saving.value = true
+    error.value = ""
+    try {
+      const created = await api<Issue>("/api/issues", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: props.projectId,
+          title: form.value.title.trim(),
+          description: form.value.description,
+          type: form.value.type,
+          status: form.value.status,
+          priority: Number(form.value.priority),
+          assigneeId: form.value.assigneeId,
+          cycleId: form.value.cycleId,
+          moduleId: form.value.moduleId,
+          startDate: form.value.startDate,
+          dueDate: form.value.dueDate,
+        }),
+      })
+      const queued = pending.value.splice(0)
+      let failed = 0
+      for (const p of queued) {
+        try {
+          await uploadFileTo(created.id, p.file)
+        } catch {
+          failed += 1
+        }
+        if (p.preview) URL.revokeObjectURL(p.preview)
+      }
+      emit("created", created)
+      if (failed) {
+        toast.error(`${failed} 个附件没传上，事项已创建`)
+        return
+      }
+      toast.success("已创建")
+      emit("close")
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "创建失败"
+      error.value = msg
+      toast.error(msg)
+    } finally {
+      saving.value = false
+    }
+    return
+  }
   saving.value = true
   error.value = ""
   try {
@@ -290,19 +400,32 @@ async function sendComment() {
   }
 }
 
-async function onPickAttachment(ev: Event) {
-  const input = ev.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = ""
-  if (!file || !props.issueId || props.canWrite === false) return
-  uploading.value = true
-  error.value = ""
-  try {
-    const res = await uploadResource(file)
-    const att = await api<IssueAttachment>(`/api/issues/${props.issueId}/attachments`, {
-      method: "POST",
-      body: JSON.stringify({ resourceId: res.id }),
-    })
+function namedFile(file: File) {
+  if (file.name && file.name !== "image.png" && file.name !== "blob") return file
+  const ext = file.type === "image/jpeg" ? "jpg" : file.type === "image/webp" ? "webp" : file.type === "image/gif" ? "gif" : "png"
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")
+  return new File([file], `截图-${stamp}.${ext}`, { type: file.type || "image/png" })
+}
+
+function filesFromClipboard(e: ClipboardEvent) {
+  const out: File[] = []
+  const items = e.clipboardData?.items
+  if (!items) return out
+  for (const item of items) {
+    if (item.kind !== "file") continue
+    const raw = item.getAsFile()
+    if (raw) out.push(namedFile(raw))
+  }
+  return out
+}
+
+async function uploadFileTo(issueId: string, file: File) {
+  const res = await uploadResource(file)
+  const att = await api<IssueAttachment>(`/api/issues/${issueId}/attachments`, {
+    method: "POST",
+    body: JSON.stringify({ resourceId: res.id }),
+  })
+  if (props.issueId === issueId) {
     attachments.value = [...attachments.value, att]
     syncAttachmentCount()
     if (isImageContentType(att.contentType)) {
@@ -313,14 +436,82 @@ async function onPickAttachment(ev: Event) {
         /* ignore */
       }
     }
-    toast.success("附件已上传")
+  }
+  return att
+}
+
+function queuePending(file: File) {
+  const preview = file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined
+  pending.value = [...pending.value, { id: crypto.randomUUID(), file, name: file.name, preview }]
+}
+
+async function ingestFiles(files: File[]) {
+  const list = files.filter(Boolean)
+  if (!list.length || props.canWrite === false) return
+  if (!props.issueId) {
+    for (const file of list) queuePending(file)
+    return
+  }
+  uploading.value = true
+  error.value = ""
+  let ok = 0
+  try {
+    for (const file of list) {
+      await uploadFileTo(props.issueId, file)
+      ok += 1
+    }
+    if (ok) toast.success(ok > 1 ? `已上传 ${ok} 个附件` : "附件已上传")
   } catch (e) {
     const msg = e instanceof Error ? e.message : "上传附件失败"
     error.value = msg
-    toast.error(msg)
+    toast.error(ok ? `已上传 ${ok} 个，其余失败` : msg)
   } finally {
     uploading.value = false
   }
+}
+
+async function onPickAttachment(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const files = [...(input.files || [])]
+  input.value = ""
+  await ingestFiles(files)
+}
+
+function onWindowPaste(e: ClipboardEvent) {
+  if (!props.open || props.canWrite === false) return
+  const files = filesFromClipboard(e)
+  if (!files.length) return
+  e.preventDefault()
+  tab.value = "feed"
+  void ingestFiles(files)
+}
+
+function onDragEnter(e: DragEvent) {
+  if (props.canWrite === false) return
+  const types = [...(e.dataTransfer?.types || [])]
+  if (!types.includes("Files")) return
+  dropHot.value = true
+  tab.value = "feed"
+}
+
+function onDropFiles(e: DragEvent) {
+  dropHot.value = false
+  const files = [...(e.dataTransfer?.files || [])]
+  if (files.length) tab.value = "feed"
+  void ingestFiles(files)
+}
+
+function onDragLeave(e: DragEvent) {
+  const next = e.relatedTarget as Node | null
+  const host = e.currentTarget as HTMLElement | null
+  if (next && host?.contains(next)) return
+  dropHot.value = false
+}
+
+function removePending(id: string) {
+  const hit = pending.value.find((p) => p.id === id)
+  if (hit?.preview) URL.revokeObjectURL(hit.preview)
+  pending.value = pending.value.filter((p) => p.id !== id)
 }
 
 async function removeAttachment(att: IssueAttachment) {
@@ -359,12 +550,18 @@ async function onDownloadAttachment(att: IssueAttachment) {
 watch(
   () => props.open,
   (isOpen) => {
-    if (!isOpen) {
+    if (isOpen) window.addEventListener("paste", onWindowPaste)
+    else {
+      window.removeEventListener("paste", onWindowPaste)
       previewDialog.value?.close()
       revokeThumbs()
+      clearPending()
+      dropHot.value = false
     }
   },
 )
+
+onUnmounted(() => window.removeEventListener("paste", onWindowPaste))
 
 function formatTime(iso: string) {
   const d = new Date(iso)
@@ -380,24 +577,36 @@ function formatTime(iso: string) {
 watch(
   () => [props.open, props.issueId] as const,
   ([isOpen, id]) => {
-    if (isOpen && id) void load()
+    if (!isOpen) return
+    if (id) {
+      tab.value = "feed"
+      void load()
+    } else resetCreate()
   },
 )
 </script>
 
 <template>
-  <NpDrawer :open="open" :title="form.title || '事项详情'" width="520px" @close="emit('close')">
+  <NpDrawer :open="open" :title="isCreate ? '新建事项' : form.title || '事项详情'" width="520px" @close="emit('close')">
     <template #eyebrow>
       <span v-if="issue">{{ issue.key }} · {{ TYPE_LABELS[issue.type] }}</span>
+      <span v-else-if="isCreate">填写后创建，附件可先粘贴或拖入</span>
     </template>
 
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="loading" class="muted">加载中…</p>
 
-    <template v-else-if="issue">
-      <p v-if="issue.parentId" class="parent-link">
+    <template v-else-if="issue || isCreate">
+    <div
+      class="pane"
+      @dragenter.prevent="onDragEnter"
+      @dragover.prevent="onDragEnter"
+      @dragleave="onDragLeave"
+      @drop.prevent="onDropFiles"
+    >
+      <p v-if="issue?.parentId" class="parent-link">
         父事项
-        <button type="button" class="link" @click="emit('open-issue', issue.parentId!)">
+        <button type="button" class="link" @click="emit('open-issue', issue.parentId)">
           {{ issue.parentKey || "查看" }}
         </button>
       </p>
@@ -413,7 +622,167 @@ watch(
         </NpBadge>
       </div>
 
-      <div class="fields">
+      <NpTabs v-model="tab" variant="line" :items="tabItems" />
+
+      <div v-show="tab === 'feed'" class="feed">
+      <section v-if="!isCreate && isRoot" class="children">
+        <h4>子事项 · {{ childProgress.done }}/{{ childProgress.total || 0 }}</h4>
+        <ul v-if="children.length" class="child-list">
+          <li v-for="ch in children" :key="ch.id" class="child-row">
+            <button type="button" class="child-main" @click="emit('open-issue', ch.id)">
+              <span class="key">{{ ch.key }}</span>
+              <span class="child-title" :class="{ done: ch.status === 'done' }">{{ ch.title }}</span>
+              <NpBadge :tone="typeTone(ch.type)">{{ TYPE_LABELS[ch.type] }}</NpBadge>
+            </button>
+            <div class="child-controls" @click.stop>
+              <div class="child-status" :class="`status-select--${ch.status}`">
+                <NpSelect
+                  size="sm"
+                  :model-value="ch.status"
+                  :disabled="canWrite === false"
+                  @update:model-value="patchChild(ch, { status: $event })"
+                >
+                  <option v-for="s in STATUS_ORDER" :key="s" :value="s">{{ STATUS_LABELS[s] }}</option>
+                </NpSelect>
+              </div>
+              <NpSelect
+                class="child-assignee"
+                size="sm"
+                :model-value="ch.assigneeId || ''"
+                :disabled="canWrite === false"
+                @update:model-value="patchChild(ch, { assigneeId: $event })"
+              >
+                <option value="">未指派</option>
+                <option v-for="u in users" :key="u.id" :value="u.id">{{ u.name }}</option>
+              </NpSelect>
+            </div>
+          </li>
+        </ul>
+        <p v-else class="muted">还没有子事项</p>
+        <div v-if="canWrite !== false" class="child-create">
+          <NpSelect v-model="childType" size="sm">
+            <option value="task">任务</option>
+            <option value="bug">缺陷</option>
+            <option value="story">需求</option>
+          </NpSelect>
+          <NpInput v-model="childTitle" placeholder="子事项标题，回车添加" @keydown.enter.prevent="createChild" />
+          <NpButton size="sm" variant="secondary" :disabled="childSaving || !childTitle.trim()" @click="createChild">
+            {{ childSaving ? "添加中…" : "添加" }}
+          </NpButton>
+        </div>
+      </section>
+
+      <section class="attachments" :class="{ 'is-drop': dropHot }">
+        <div class="attachments-head">
+          <h4>附件 · {{ attachments.length + pending.length }}</h4>
+          <template v-if="canWrite !== false">
+            <input
+              ref="fileInput"
+              type="file"
+              multiple
+              class="file-input"
+              @change="onPickAttachment"
+            />
+            <NpButton
+              size="sm"
+              variant="secondary"
+              :disabled="uploading"
+              @click="fileInput?.click()"
+            >
+              {{ uploading ? "上传中…" : "上传附件" }}
+            </NpButton>
+          </template>
+        </div>
+        <p class="drop-hint">支持点击上传、粘贴截图、把文件拖到这里</p>
+        <ul v-if="pending.length" class="att-list">
+          <li v-for="p in pending" :key="p.id" class="att-row">
+            <div class="att-main">
+              <span class="att-thumb-wrap">
+                <img v-if="p.preview" class="att-thumb" :src="p.preview" alt="" />
+                <span v-else class="att-icon">文件</span>
+              </span>
+              <span class="att-text">
+                <span class="att-name">{{ p.name }}</span>
+                <span class="att-meta">待创建后上传</span>
+              </span>
+            </div>
+            <div class="att-ops">
+              <button type="button" class="att-op danger" @click="removePending(p.id)">移除</button>
+            </div>
+          </li>
+        </ul>
+        <p v-if="!attachments.length && !pending.length" class="muted">还没有附件</p>
+        <ul v-else class="att-list">
+          <li v-for="att in attachments" :key="att.id" class="att-row">
+            <button type="button" class="att-main" @click="onOpenAttachment(att)">
+              <span class="att-thumb-wrap">
+                <img
+                  v-if="thumbUrls[att.id]"
+                  class="att-thumb"
+                  :src="thumbUrls[att.id]"
+                  alt=""
+                />
+                <span v-else class="att-icon" :data-kind="kindOf(att)">{{ fileKindLabel(kindOf(att)) }}</span>
+              </span>
+              <span class="att-text">
+                <span class="att-name">{{ att.originalName }}</span>
+                <span class="att-meta">
+                  {{ formatBytes(att.sizeBytes) }} · {{ att.creatorName || "用户" }}
+                  <template v-if="canPreview(att)"> · 点击预览</template>
+                </span>
+              </span>
+            </button>
+            <div class="att-ops">
+              <button v-if="canPreview(att)" type="button" class="att-op" @click="onOpenAttachment(att)">预览</button>
+              <button type="button" class="att-op" @click="onDownloadAttachment(att)">下载</button>
+              <button
+                v-if="canWrite !== false"
+                type="button"
+                class="att-op danger"
+                @click="removeAttachment(att)"
+              >
+                删除
+              </button>
+            </div>
+          </li>
+        </ul>
+      </section>
+
+      <AttachmentPreviewDialog ref="previewDialog" />
+
+      <section v-if="!isCreate" class="comments">
+        <h4>评论 · {{ comments.length }}</h4>
+        <div v-if="!comments.length" class="muted">还没有评论</div>
+        <article v-for="cm in comments" :key="cm.id" class="comment">
+          <UserAvatar
+            size="sm"
+            :name="cm.authorName"
+            :account="cm.authorAccount"
+            :avatar-url="cm.authorAvatarUrl"
+          />
+          <div class="comment-main">
+            <header>
+              <strong>{{ cm.authorName || "用户" }}</strong>
+              <span>{{ formatTime(cm.createdAt) }}</span>
+            </header>
+            <p>{{ cm.body }}</p>
+          </div>
+        </article>
+
+        <div class="composer">
+          <NpTextarea v-model="draft" placeholder="写下进展、疑问或验收意见…" :rows="3" />
+          <NpButton
+            variant="secondary"
+            :disabled="commenting || !draft.trim() || canWrite === false"
+            @click="sendComment"
+          >
+            {{ commenting ? "发送中…" : "发表评论" }}
+          </NpButton>
+        </div>
+      </section>
+      </div>
+
+      <div v-show="tab === 'base'" class="fields">
         <NpField label="标题">
           <NpInput v-model="form.title" />
         </NpField>
@@ -478,141 +847,13 @@ watch(
           <NpTextarea v-model="form.description" :rows="5" />
         </NpField>
       </div>
-
-      <section v-if="isRoot" class="children">
-        <h4>子事项 · {{ childProgress.done }}/{{ childProgress.total || 0 }}</h4>
-        <ul v-if="children.length" class="child-list">
-          <li v-for="ch in children" :key="ch.id" class="child-row">
-            <button type="button" class="child-main" @click="emit('open-issue', ch.id)">
-              <span class="key">{{ ch.key }}</span>
-              <span class="child-title" :class="{ done: ch.status === 'done' }">{{ ch.title }}</span>
-              <NpBadge :tone="typeTone(ch.type)">{{ TYPE_LABELS[ch.type] }}</NpBadge>
-            </button>
-            <div class="child-controls" @click.stop>
-              <div class="child-status" :class="`status-select--${ch.status}`">
-                <NpSelect
-                  size="sm"
-                  :model-value="ch.status"
-                  :disabled="canWrite === false"
-                  @update:model-value="patchChild(ch, { status: $event })"
-                >
-                  <option v-for="s in STATUS_ORDER" :key="s" :value="s">{{ STATUS_LABELS[s] }}</option>
-                </NpSelect>
-              </div>
-              <NpSelect
-                class="child-assignee"
-                size="sm"
-                :model-value="ch.assigneeId || ''"
-                :disabled="canWrite === false"
-                @update:model-value="patchChild(ch, { assigneeId: $event })"
-              >
-                <option value="">未指派</option>
-                <option v-for="u in users" :key="u.id" :value="u.id">{{ u.name }}</option>
-              </NpSelect>
-            </div>
-          </li>
-        </ul>
-        <p v-else class="muted">还没有子事项</p>
-        <div v-if="canWrite !== false" class="child-create">
-          <NpSelect v-model="childType" size="sm">
-            <option value="task">任务</option>
-            <option value="bug">缺陷</option>
-            <option value="story">需求</option>
-          </NpSelect>
-          <NpInput v-model="childTitle" placeholder="子事项标题，回车添加" @keydown.enter.prevent="createChild" />
-          <NpButton size="sm" variant="secondary" :disabled="childSaving || !childTitle.trim()" @click="createChild">
-            {{ childSaving ? "添加中…" : "添加" }}
-          </NpButton>
-        </div>
-      </section>
-
-      <section class="attachments">
-        <div class="attachments-head">
-          <h4>附件 · {{ attachments.length }}</h4>
-          <template v-if="canWrite !== false">
-            <input
-              ref="fileInput"
-              type="file"
-              class="file-input"
-              @change="onPickAttachment"
-            />
-            <NpButton
-              size="sm"
-              variant="secondary"
-              :disabled="uploading"
-              @click="fileInput?.click()"
-            >
-              {{ uploading ? "上传中…" : "上传附件" }}
-            </NpButton>
-          </template>
-        </div>
-        <p v-if="!attachments.length" class="muted">还没有附件</p>
-        <ul v-else class="att-list">
-          <li v-for="att in attachments" :key="att.id" class="att-row">
-            <button type="button" class="att-main" @click="onOpenAttachment(att)">
-              <span class="att-thumb-wrap">
-                <img
-                  v-if="thumbUrls[att.id]"
-                  class="att-thumb"
-                  :src="thumbUrls[att.id]"
-                  alt=""
-                />
-                <span v-else class="att-icon" :data-kind="kindOf(att)">{{ fileKindLabel(kindOf(att)) }}</span>
-              </span>
-              <span class="att-text">
-                <span class="att-name">{{ att.originalName }}</span>
-                <span class="att-meta">
-                  {{ formatBytes(att.sizeBytes) }} · {{ att.creatorName || "用户" }}
-                  <template v-if="canPreview(att)"> · 点击预览</template>
-                </span>
-              </span>
-            </button>
-            <div class="att-ops">
-              <button v-if="canPreview(att)" type="button" class="att-op" @click="onOpenAttachment(att)">预览</button>
-              <button type="button" class="att-op" @click="onDownloadAttachment(att)">下载</button>
-              <button
-                v-if="canWrite !== false"
-                type="button"
-                class="att-op danger"
-                @click="removeAttachment(att)"
-              >
-                删除
-              </button>
-            </div>
-          </li>
-        </ul>
-      </section>
-
-      <AttachmentPreviewDialog ref="previewDialog" />
-
-      <section class="comments">
-        <h4>评论 · {{ comments.length }}</h4>
-        <div v-if="!comments.length" class="muted">还没有评论</div>
-        <article v-for="cm in comments" :key="cm.id" class="comment">
-          <header>
-            <strong>{{ cm.authorName || "用户" }}</strong>
-            <span>{{ formatTime(cm.createdAt) }}</span>
-          </header>
-          <p>{{ cm.body }}</p>
-        </article>
-
-        <div class="composer">
-          <NpTextarea v-model="draft" placeholder="写下进展、疑问或验收意见…" :rows="3" />
-          <NpButton
-            variant="secondary"
-            :disabled="commenting || !draft.trim() || canWrite === false"
-            @click="sendComment"
-          >
-            {{ commenting ? "发送中…" : "发表评论" }}
-          </NpButton>
-        </div>
-      </section>
+    </div>
     </template>
 
     <template #footer>
       <NpButton variant="ghost" @click="emit('close')">关闭</NpButton>
-      <NpButton variant="primary" :disabled="saving || loading || canWrite === false" @click="save">
-        {{ saving ? "保存中…" : "保存修改" }}
+      <NpButton variant="primary" :disabled="saving || loading || canWrite === false || !form.title.trim()" @click="save">
+        {{ saving ? (isCreate ? "创建中…" : "保存中…") : isCreate ? "创建" : "保存修改" }}
       </NpButton>
     </template>
   </NpDrawer>
@@ -624,6 +865,11 @@ watch(
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 16px;
+}
+
+.feed,
+.fields {
+  margin-top: 16px;
 }
 
 .fields {
@@ -652,12 +898,6 @@ watch(
   font-weight: 600;
   cursor: pointer;
   padding: 0 2px;
-}
-
-.children {
-  margin-top: 22px;
-  padding-top: 16px;
-  border-top: 1px solid var(--np-border);
 }
 
 .children h4 {
@@ -747,9 +987,21 @@ watch(
 }
 
 .attachments {
-  margin-top: 22px;
-  padding-top: 16px;
-  border-top: 1px solid var(--np-border);
+  margin-top: 8px;
+  padding: 8px 0 4px;
+  border: 1px dashed transparent;
+  border-radius: var(--np-radius-md);
+}
+
+.attachments.is-drop {
+  border-color: var(--np-accent);
+  background: var(--np-accent-muted);
+}
+
+.drop-hint {
+  margin: 0 0 8px;
+  color: var(--np-text-muted);
+  font-size: var(--np-text-xs);
 }
 
 .attachments-head {
@@ -891,9 +1143,9 @@ watch(
 }
 
 .comments {
-  margin-top: 28px;
-  padding-top: 18px;
-  border-top: 1px solid var(--np-border);
+  margin-top: 16px;
+  padding-top: 0;
+  border-top: none;
 }
 
 .comments h4 {
@@ -902,8 +1154,16 @@ watch(
 }
 
 .comment {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
   padding: 10px 0;
   border-bottom: 1px solid var(--np-border);
+}
+
+.comment-main {
+  flex: 1;
+  min-width: 0;
 }
 
 .comment header {
