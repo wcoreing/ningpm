@@ -69,5 +69,6 @@ func (s *Server) handleCreateComment(c *gin.Context) {
 		return
 	}
 	s.notifyCommented(actorID, it, body)
+	s.recordIssueEvent("ev-comment-"+cm.ID, issueID, actorID, "comment", "发表了评论", cm.CreatedAt)
 	OK(c, cm)
 }

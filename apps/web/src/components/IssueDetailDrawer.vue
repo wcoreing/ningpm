@@ -34,6 +34,18 @@ export type IssueComment = {
   createdAt: string
 }
 
+export type IssueEvent = {
+  id: string
+  issueId: string
+  actorId?: string
+  actorName?: string
+  actorAccount?: string
+  actorAvatarUrl?: string
+  kind: string
+  summary: string
+  createdAt: string
+}
+
 export type IssueAttachment = {
   id: string
   issueId: string
@@ -77,6 +89,7 @@ const uploading = ref(false)
 const error = ref("")
 const issue = ref<Issue | null>(null)
 const comments = ref<IssueComment[]>([])
+const events = ref<IssueEvent[]>([])
 const attachments = ref<IssueAttachment[]>([])
 const children = ref<Issue[]>([])
 const draft = ref("")
@@ -150,6 +163,7 @@ const feedbackCount = computed(() => {
 const tabItems = computed(() => [
   { value: "base", label: "基础" },
   { value: "feed", label: feedbackCount.value ? `反馈 · ${feedbackCount.value}` : "反馈" },
+  { value: "log", label: events.value.length ? `操作日志 · ${events.value.length}` : "操作日志" },
 ])
 const childProgress = computed(() => {
   const total = children.value.length
@@ -162,14 +176,16 @@ async function load() {
   loading.value = true
   error.value = ""
   try {
-    const [it, cms, atts] = await Promise.all([
+    const [it, cms, atts, evs] = await Promise.all([
       api<Issue>(`/api/issues/${props.issueId}`),
       api<IssueComment[]>(`/api/issues/${props.issueId}/comments`),
       api<IssueAttachment[]>(`/api/issues/${props.issueId}/attachments`),
+      api<IssueEvent[]>(`/api/issues/${props.issueId}/events`),
     ])
     issue.value = it
     comments.value = cms
     attachments.value = atts
+    events.value = evs
     void loadThumbs(atts)
     form.value = {
       title: it.title,
@@ -227,12 +243,22 @@ async function createChild() {
   }
 }
 
+async function refreshEvents() {
+  if (!props.issueId) return
+  try {
+    events.value = await api<IssueEvent[]>(`/api/issues/${props.issueId}/events`)
+  } catch {
+    /* 日志刷新失败不打断当前操作 */
+  }
+}
+
 async function refreshSelf() {
   if (!issue.value) return
   const latest = await api<Issue>(`/api/issues/${issue.value.id}`)
   issue.value = latest
   form.value.status = latest.status
   emit("updated", latest)
+  await refreshEvents()
 }
 
 async function patchChild(child: Issue, patch: { status?: string; assigneeId?: string }) {
@@ -283,6 +309,7 @@ function resetCreate() {
   tab.value = "base"
   issue.value = null
   comments.value = []
+  events.value = []
   attachments.value = []
   children.value = []
   draft.value = ""
@@ -390,6 +417,7 @@ async function sendComment() {
     })
     comments.value = [...comments.value, cm]
     draft.value = ""
+    await refreshEvents()
     toast.success("评论已发表")
   } catch (e) {
     const msg = e instanceof Error ? e.message : "评论失败"
@@ -460,7 +488,10 @@ async function ingestFiles(files: File[]) {
       await uploadFileTo(props.issueId, file)
       ok += 1
     }
-    if (ok) toast.success(ok > 1 ? `已上传 ${ok} 个附件` : "附件已上传")
+    if (ok) {
+      await refreshEvents()
+      toast.success(ok > 1 ? `已上传 ${ok} 个附件` : "附件已上传")
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : "上传附件失败"
     error.value = msg
@@ -525,6 +556,7 @@ async function removeAttachment(att: IssueAttachment) {
     }
     attachments.value = attachments.value.filter((a) => a.id !== att.id)
     syncAttachmentCount()
+    await refreshEvents()
     toast.success("已移除附件")
   } catch (e) {
     toast.error(e instanceof Error ? e.message : "删除附件失败")
@@ -589,8 +621,18 @@ watch(
 <template>
   <NpDrawer :open="open" :title="isCreate ? '新建事项' : form.title || '事项详情'" width="520px" @close="emit('close')">
     <template #eyebrow>
-      <span v-if="issue">{{ issue.key }} · {{ TYPE_LABELS[issue.type] }}</span>
-      <span v-else-if="isCreate">填写后创建，附件可先粘贴或拖入</span>
+      <span v-if="issue || isCreate" class="eyebrow-row">
+        <span v-if="issue" class="eyebrow-key">{{ issue.key }}</span>
+        <span v-else class="eyebrow-key">新建</span>
+        <NpBadge :tone="typeTone(form.type)">{{ TYPE_LABELS[form.type] }}</NpBadge>
+        <NpBadge :tone="priorityTone(Number(form.priority))">
+          {{ PRIORITY_LABELS[Number(form.priority)] }}
+        </NpBadge>
+        <NpBadge>{{ STATUS_LABELS[form.status] }}</NpBadge>
+        <NpBadge v-if="!isCreate && isRoot && childProgress.total" tone="accent">
+          子项 {{ childProgress.done }}/{{ childProgress.total }}
+        </NpBadge>
+      </span>
     </template>
 
     <p v-if="error" class="error">{{ error }}</p>
@@ -610,17 +652,6 @@ watch(
           {{ issue.parentKey || "查看" }}
         </button>
       </p>
-
-      <div class="meta">
-        <NpBadge :tone="typeTone(form.type)">{{ TYPE_LABELS[form.type] }}</NpBadge>
-        <NpBadge :tone="priorityTone(Number(form.priority))">
-          {{ PRIORITY_LABELS[Number(form.priority)] }}
-        </NpBadge>
-        <NpBadge>{{ STATUS_LABELS[form.status] }}</NpBadge>
-        <NpBadge v-if="isRoot && childProgress.total" tone="accent">
-          子项 {{ childProgress.done }}/{{ childProgress.total }}
-        </NpBadge>
-      </div>
 
       <NpTabs v-model="tab" variant="line" :items="tabItems" />
 
@@ -782,6 +813,27 @@ watch(
       </section>
       </div>
 
+      <section v-show="tab === 'log'" class="log">
+        <h4>操作日志</h4>
+        <p v-if="isCreate" class="muted">创建后开始记录</p>
+        <p v-else-if="!events.length" class="muted">还没有操作记录</p>
+        <article v-for="ev in events" :key="ev.id" class="log-item">
+          <UserAvatar
+            size="sm"
+            :name="ev.actorName || '系统'"
+            :account="ev.actorAccount"
+            :avatar-url="ev.actorAvatarUrl"
+          />
+          <div class="log-main">
+            <header>
+              <strong>{{ ev.actorName || "系统" }}</strong>
+              <span>{{ formatTime(ev.createdAt) }}</span>
+            </header>
+            <p>{{ ev.summary }}</p>
+          </div>
+        </article>
+      </section>
+
       <div v-show="tab === 'base'" class="fields">
         <NpField label="标题">
           <NpInput v-model="form.title" />
@@ -860,11 +912,24 @@ watch(
 </template>
 
 <style scoped>
-.meta {
-  display: flex;
+.eyebrow-row {
+  display: inline-flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 16px;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.eyebrow-key {
+  font-family: var(--np-font-mono);
+  color: var(--np-text-muted);
+}
+
+.eyebrow-row :deep(.np-badge) {
+  padding: 0 6px;
+  height: 18px;
+  font-size: 11px;
+  line-height: 18px;
 }
 
 .feed,
@@ -1142,15 +1207,49 @@ watch(
   background: #fef2f2;
 }
 
+.log h4,
+.comments h4 {
+  margin: 0 0 12px;
+  font-size: var(--np-text-md);
+}
+
+.log-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--np-border);
+}
+
+.log-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.log-item header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: var(--np-text-xs);
+  color: var(--np-text-muted);
+}
+
+.log-item header strong {
+  color: var(--np-text);
+  font-size: var(--np-text-sm);
+}
+
+.log-item p {
+  margin: 0;
+  line-height: 1.5;
+  font-size: var(--np-text-sm);
+}
+
 .comments {
   margin-top: 16px;
   padding-top: 0;
   border-top: none;
-}
-
-.comments h4 {
-  margin: 0 0 12px;
-  font-size: var(--np-text-md);
 }
 
 .comment {

@@ -190,6 +190,10 @@ func (s *Server) handleCreateIssue(c *gin.Context) {
 		Fail(c, http.StatusInternalServerError, "创建事项失败")
 		return
 	}
+	s.recordIssueEvent("ev-created-"+it.ID, it.ID, it.CreatorID, "created", "创建了事项", it.CreatedAt)
+	if it.ParentID != "" {
+		s.recordIssueEvent("ev-child-"+it.ID, it.ParentID, it.CreatorID, "child", "添加了子事项「"+clipRunes(it.Title, 40)+"」", it.CreatedAt)
+	}
 	s.notifyAssigned(currentUserID(c), it)
 	OK(c, it)
 }
@@ -224,6 +228,7 @@ func (s *Server) handleUpdateIssue(c *gin.Context) {
 		return
 	}
 	prevAssignee := it.AssigneeID
+	before := *it
 	var req updateIssueReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, http.StatusBadRequest, "请求无效")
@@ -306,10 +311,12 @@ func (s *Server) handleUpdateIssue(c *gin.Context) {
 		it.StartDate = startDate
 		it.DueDate = dueDate
 	}
-	if err := s.store.UpdateIssue(it); err != nil {
+	actorID := currentUserID(c)
+	if err := s.store.UpdateIssue(it, actorID); err != nil {
 		Fail(c, http.StatusInternalServerError, "更新事项失败")
 		return
 	}
+	s.recordIssueDiff(actorID, &before, it)
 	if req.AssigneeID != nil && it.AssigneeID != "" && it.AssigneeID != prevAssignee {
 		s.notifyAssigned(currentUserID(c), it)
 	}
@@ -334,7 +341,11 @@ func (s *Server) handleUpdateIssueStatus(c *gin.Context) {
 	if !s.requireWrite(c, current.ProjectID) {
 		return
 	}
-	it, err := s.store.UpdateIssueStatus(c.Param("id"), req.Status)
+	actorID := currentUserID(c)
+	if current.Status != req.Status {
+		s.recordIssueEvent("", current.ID, actorID, "status", "把状态从"+issue.StatusLabel(current.Status)+"改为"+issue.StatusLabel(req.Status), time.Now().UTC())
+	}
+	it, err := s.store.UpdateIssueStatus(c.Param("id"), req.Status, actorID)
 	if err != nil {
 		Fail(c, http.StatusInternalServerError, "更新状态失败")
 		return
@@ -360,7 +371,11 @@ func (s *Server) handleReorderIssueBoard(c *gin.Context) {
 	if !s.requireWrite(c, current.ProjectID) {
 		return
 	}
-	it, err := s.store.ReorderIssueBoard(c.Param("id"), req.Status, strings.TrimSpace(req.BeforeID), strings.TrimSpace(req.AfterID))
+	actorID := currentUserID(c)
+	if current.Status != req.Status {
+		s.recordIssueEvent("", current.ID, actorID, "status", "把状态从"+issue.StatusLabel(current.Status)+"改为"+issue.StatusLabel(req.Status), time.Now().UTC())
+	}
+	it, err := s.store.ReorderIssueBoard(c.Param("id"), req.Status, strings.TrimSpace(req.BeforeID), strings.TrimSpace(req.AfterID), actorID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			Fail(c, http.StatusBadRequest, "锚点事项不存在")

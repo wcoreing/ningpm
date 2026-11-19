@@ -17,6 +17,7 @@ import (
 	"github.com/ningpm/ningpm/apps/api/internal/domain/comment"
 	"github.com/ningpm/ningpm/apps/api/internal/domain/cycle"
 	"github.com/ningpm/ningpm/apps/api/internal/domain/issue"
+	"github.com/ningpm/ningpm/apps/api/internal/domain/issueevent"
 	"github.com/ningpm/ningpm/apps/api/internal/domain/member"
 	"github.com/ningpm/ningpm/apps/api/internal/domain/module"
 	"github.com/ningpm/ningpm/apps/api/internal/domain/notification"
@@ -120,7 +121,7 @@ func (s *Store) idType() string {
 	return "TEXT"
 }
 
-// textDef is a text-ish column that may carry DEFAULT '' (MySQL forbids DEFAULT on TEXT).
+// textDef is a text-ish column that may carry DEFAULT ” (MySQL forbids DEFAULT on TEXT).
 func (s *Store) textDef() string {
 	if s.driver == "mysql" {
 		return "VARCHAR(4096) NOT NULL DEFAULT ''"
@@ -352,6 +353,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.ensureResourceTables(); err != nil {
+		return err
+	}
+	if err := s.ensureIssueEvents(); err != nil {
 		return err
 	}
 	if err := s.ClearLegacyAvatarFiles(); err != nil {
@@ -1330,7 +1334,7 @@ func (s *Store) CreateIssue(it *issue.Issue) error {
 		return err
 	}
 	if it.ParentID != "" {
-		_ = s.syncIssueProgressFromChildren(it.ParentID)
+		_ = s.syncIssueProgressFromChildren(it.ParentID, it.CreatorID)
 	}
 	return s.hydrateIssue(it)
 }
@@ -1440,7 +1444,7 @@ func (s *Store) GetIssue(id string) (*issue.Issue, error) {
 	return scanIssueRow(row)
 }
 
-func (s *Store) UpdateIssue(it *issue.Issue) error {
+func (s *Store) UpdateIssue(it *issue.Issue, actorID string) error {
 	it.UpdatedAt = time.Now().UTC()
 	_, err := s.db.Exec(
 		`UPDATE issues SET type=?, title=?, description=?, status=?, priority=?, assignee_id=?, cycle_id=?, module_id=?, start_date=?, due_date=?, updated_at=? WHERE id=?`,
@@ -1450,11 +1454,11 @@ func (s *Store) UpdateIssue(it *issue.Issue) error {
 	if err != nil {
 		return err
 	}
-	_ = s.SyncParentFromChildren(it.ID)
+	_ = s.SyncParentFromChildren(it.ID, actorID)
 	return s.hydrateIssue(it)
 }
 
-func (s *Store) UpdateIssueStatus(id string, status issue.Status) (*issue.Issue, error) {
+func (s *Store) UpdateIssueStatus(id string, status issue.Status, actorID string) (*issue.Issue, error) {
 	now := time.Now().UTC()
 	// 改状态且未指定落点：按最后修改沉到该泳道顶部
 	_, err := s.db.Exec(
@@ -1464,7 +1468,7 @@ func (s *Store) UpdateIssueStatus(id string, status issue.Status) (*issue.Issue,
 	if err != nil {
 		return nil, err
 	}
-	_ = s.SyncParentFromChildren(id)
+	_ = s.SyncParentFromChildren(id, actorID)
 	return s.GetIssue(id)
 }
 
@@ -1473,7 +1477,7 @@ const boardOrderGap = 1000.0
 // ReorderIssueBoard moves an issue into a status lane at a relative position.
 // beforeID is the card that should sit above; afterID is the card below.
 // When both empty, the card goes to the top of the lane (last-modified order).
-func (s *Store) ReorderIssueBoard(id string, status issue.Status, beforeID, afterID string) (*issue.Issue, error) {
+func (s *Store) ReorderIssueBoard(id string, status issue.Status, beforeID, afterID, actorID string) (*issue.Issue, error) {
 	current, err := s.GetIssue(id)
 	if err != nil {
 		return nil, err
@@ -1490,7 +1494,7 @@ func (s *Store) ReorderIssueBoard(id string, status issue.Status, beforeID, afte
 	if err != nil {
 		return nil, err
 	}
-	_ = s.SyncParentFromChildren(id)
+	_ = s.SyncParentFromChildren(id, actorID)
 	return s.GetIssue(id)
 }
 
@@ -1570,7 +1574,7 @@ func (s *Store) resequenceBoardLane(projectID string, status issue.Status, movin
 }
 
 // SyncParentFromChildren rolls parent status from children when the given issue is a child.
-func (s *Store) SyncParentFromChildren(childID string) error {
+func (s *Store) SyncParentFromChildren(childID, actorID string) error {
 	var parentID sql.NullString
 	err := s.db.QueryRow(`SELECT parent_id FROM issues WHERE id = ?`, childID).Scan(&parentID)
 	if err != nil {
@@ -1579,7 +1583,7 @@ func (s *Store) SyncParentFromChildren(childID string) error {
 	if !parentID.Valid || parentID.String == "" {
 		return nil
 	}
-	return s.syncIssueProgressFromChildren(parentID.String)
+	return s.syncIssueProgressFromChildren(parentID.String, actorID)
 }
 
 func desiredParentStatus(total, done, active int, current issue.Status) (issue.Status, bool) {
@@ -1606,7 +1610,7 @@ func desiredParentStatus(total, done, active int, current issue.Status) (issue.S
 	return current, false
 }
 
-func (s *Store) syncIssueProgressFromChildren(parentID string) error {
+func (s *Store) syncIssueProgressFromChildren(parentID, actorID string) error {
 	var total, done, active int
 	err := s.db.QueryRow(`
 		SELECT COUNT(1),
@@ -1624,11 +1628,21 @@ func (s *Store) syncIssueProgressFromChildren(parentID string) error {
 	if !changed {
 		return nil
 	}
+	now := time.Now().UTC()
 	_, err = s.db.Exec(
 		`UPDATE issues SET status=?, updated_at=? WHERE id=?`,
-		next, time.Now().UTC().Format(time.RFC3339), parentID,
+		next, now.Format(time.RFC3339), parentID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.AddIssueEvent(issueevent.Event{
+		IssueID:   parentID,
+		ActorID:   actorID,
+		Kind:      "status",
+		Summary:   "因子事项进度，状态从" + issue.StatusLabel(parent.Status) + "改为" + issue.StatusLabel(next),
+		CreatedAt: now,
+	})
 }
 
 func (s *Store) hydrateIssue(it *issue.Issue) error {
@@ -1948,7 +1962,7 @@ SELECT m.id, m.project_id, m.name, m.description, m.status, COALESCE(m.lead_id, 
 FROM modules m
 LEFT JOIN users u ON u.id = m.lead_id
 WHERE m.project_id = ?
-` + s.orderByNameAsc("m.name"), projectID)
+`+s.orderByNameAsc("m.name"), projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -2239,7 +2253,7 @@ func (s *Store) ensureDemoNotifications() error {
 // ensureDemoSubIssues seeds one-level children under a DEMO story/task.
 func (s *Store) ensureDemoSubIssues() error {
 	var projectID, adminID, parentID string
-	err := s.db.QueryRow(`SELECT id, creator_id FROM projects WHERE ` + s.projectKeyCol("") + ` = 'DEMO'`).Scan(&projectID, &adminID)
+	err := s.db.QueryRow(`SELECT id, creator_id FROM projects WHERE `+s.projectKeyCol("")+` = 'DEMO'`).Scan(&projectID, &adminID)
 	if err == sql.ErrNoRows {
 		return nil
 	}

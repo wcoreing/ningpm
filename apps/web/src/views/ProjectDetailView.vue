@@ -31,12 +31,12 @@ import {
   isOverdue,
   todayISO,
 } from "../lib/schedule"
+import { api } from "../lib/api"
 import type { Cycle, Issue, Module, UserOption } from "../types"
 import { exportProjectReport } from "../lib/reportExport"
 import { useAuthStore } from "../stores/auth"
 import { usePageHeaderStore } from "../stores/pageHeader"
 import { useProjectStore } from "../stores/project"
-import { useProjectsStore } from "../stores/projects"
 import IssueDetailDrawer from "../components/IssueDetailDrawer.vue"
 import ModuleTagPicker from "../components/ModuleTagPicker.vue"
 import ProjectAttachmentsPanel from "../components/ProjectAttachmentsPanel.vue"
@@ -47,7 +47,6 @@ const router = useRouter()
 const auth = useAuthStore()
 const pageHeader = usePageHeaderStore()
 const projectStore = useProjectStore()
-const projectsStore = useProjectsStore()
 const {
   project,
   issues,
@@ -105,11 +104,53 @@ function goSide(value: (typeof sideItems)[number]["value"]) {
   view.value = value
 }
 const cycleOpen = ref(false)
-const editOpen = ref(false)
-const editSaving = ref(false)
-const editForm = ref({ name: "", description: "" })
 const detailOpen = ref(false)
 const activeIssueId = ref<string | null>(null)
+
+type ProjectEvent = {
+  id: string
+  issueId: string
+  issueKey?: string
+  issueTitle?: string
+  actorName?: string
+  summary: string
+  createdAt: string
+}
+const projectEvents = ref<ProjectEvent[]>([])
+
+const SIDE_MIN = 148
+const SIDE_MAX = 420
+const SIDE_KEY = "ningpm.projectSideWidth"
+const sideWidth = ref(readSideWidth())
+const sideDragging = ref(false)
+
+function readSideWidth() {
+  try {
+    const n = Number(localStorage.getItem(SIDE_KEY))
+    if (!Number.isFinite(n)) return 168
+    return Math.min(SIDE_MAX, Math.max(SIDE_MIN, Math.round(n)))
+  } catch {
+    return 168
+  }
+}
+
+function onSideResizeDown(e: PointerEvent) {
+  if (window.innerWidth <= 860) return
+  sideDragging.value = true
+  const startX = e.clientX
+  const startW = sideWidth.value
+  const move = (ev: PointerEvent) => {
+    sideWidth.value = Math.min(SIDE_MAX, Math.max(SIDE_MIN, Math.round(startW + ev.clientX - startX)))
+  }
+  const up = () => {
+    sideDragging.value = false
+    localStorage.setItem(SIDE_KEY, String(sideWidth.value))
+    window.removeEventListener("pointermove", move)
+    window.removeEventListener("pointerup", up)
+  }
+  window.addEventListener("pointermove", move)
+  window.addEventListener("pointerup", up)
+}
 const memberSaving = ref(false)
 const cycleSaving = ref(false)
 const inviteQuery = ref("")
@@ -626,33 +667,13 @@ function syncPageHeader() {
   })
 }
 
-function openEditProject() {
-  const p = project.value
-  if (!p) return
-  editForm.value = { name: p.name, description: p.description || "" }
-  editOpen.value = true
-}
-
-async function saveProject() {
-  const name = editForm.value.name.trim()
-  if (!name) {
-    toast.warning("项目名称不能为空")
-    return
-  }
-  editSaving.value = true
+async function loadProjectEvents() {
+  const id = String(route.params.id || "")
+  if (!id) return
   try {
-    const updated = await projectStore.updateProject({
-      name,
-      description: editForm.value.description.trim(),
-    })
-    projectsStore.upsert(updated)
-    syncPageHeader()
-    editOpen.value = false
-    toast.success("项目已更新")
-  } catch (e) {
-    toast.error(e instanceof Error ? e.message : "更新失败")
-  } finally {
-    editSaving.value = false
+    projectEvents.value = await api<ProjectEvent[]>(`/api/projects/${id}/events`)
+  } catch {
+    projectEvents.value = []
   }
 }
 
@@ -664,6 +685,7 @@ async function load() {
   } catch {
     /* error already on store */
   }
+  void loadProjectEvents()
 }
 
 function pickInviteUser(u: UserOption) {
@@ -759,6 +781,12 @@ function openCreate() {
 function onIssueCreated(issue: Issue) {
   projectStore.upsertIssue(issue)
   activeIssueId.value = issue.id
+  void loadProjectEvents()
+}
+
+function closeDetail() {
+  detailOpen.value = false
+  void loadProjectEvents()
 }
 
 function openCreateCycle() {
@@ -931,6 +959,7 @@ function openDetail(issueId: string) {
 
 function onIssueUpdated(updated: Issue) {
   projectStore.upsertIssue(updated)
+  void loadProjectEvents()
 }
 
 watch(view, (v) => {
@@ -967,7 +996,11 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
 </script>
 
 <template>
-  <div class="page" :class="{ 'page--board': view === 'board' }">
+  <div
+    class="page"
+    :class="{ 'page--board': view === 'board', 'is-resizing': sideDragging }"
+    :style="{ '--side-w': sideWidth + 'px' }"
+  >
     <aside class="side" aria-label="项目菜单">
       <nav class="side-nav">
         <button
@@ -1009,9 +1042,31 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
           <span>{{ item.label }}</span>
         </button>
       </nav>
-      <div v-if="canManage" class="side-foot">
-        <NpButton size="sm" variant="ghost" block @click="openEditProject">编辑项目</NpButton>
-      </div>
+      <section class="side-log" aria-label="最新操作">
+        <h3>最新操作</h3>
+        <p v-if="!projectEvents.length" class="side-log-empty">还没有操作</p>
+        <ul v-else class="side-log-list">
+          <li v-for="ev in projectEvents" :key="ev.id">
+            <button type="button" class="side-log-item" @click="openDetail(ev.issueId)">
+              <span class="side-log-sum">
+                <span v-if="ev.issueKey" class="side-log-key">{{ ev.issueKey }}</span>
+                {{ ev.summary }}
+              </span>
+              <span class="side-log-meta">
+                <strong>{{ ev.actorName || "系统" }}</strong>
+                <time :title="formatUpdatedFull(ev.createdAt)">{{ formatUpdatedLabel(ev.createdAt) }}</time>
+              </span>
+            </button>
+          </li>
+        </ul>
+      </section>
+      <div
+        class="side-resize"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整左栏宽度"
+        @pointerdown.prevent="onSideResizeDown"
+      />
     </aside>
 
     <section class="main">
@@ -1825,26 +1880,6 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
       </template>
     </NpModal>
 
-    <NpModal :open="editOpen" title="编辑项目" @close="editOpen = false">
-      <div class="form">
-        <NpField label="项目标识">
-          <NpInput :model-value="project?.key || ''" disabled />
-        </NpField>
-        <NpField label="项目名称">
-          <NpInput v-model="editForm.name" placeholder="项目名称" />
-        </NpField>
-        <NpField label="描述">
-          <NpTextarea v-model="editForm.description" placeholder="项目目标与范围" :rows="3" />
-        </NpField>
-      </div>
-      <template #footer>
-        <NpButton variant="ghost" @click="editOpen = false">取消</NpButton>
-        <NpButton variant="primary" :disabled="editSaving" @click="saveProject">
-          {{ editSaving ? "保存中…" : "保存" }}
-        </NpButton>
-      </template>
-    </NpModal>
-
     <IssueDetailDrawer
       :open="detailOpen"
       :issue-id="activeIssueId"
@@ -1856,7 +1891,7 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
       :default-assignee-id="auth.user?.id || ''"
       :default-cycle-id="activeCycle?.id || ''"
       :default-module-id="moduleFilter !== 'all' ? moduleFilter : ''"
-      @close="detailOpen = false"
+      @close="closeDetail"
       @updated="onIssueUpdated"
       @created="onIssueCreated"
       @open-issue="openDetail"
@@ -1868,7 +1903,7 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
 <style scoped>
 .page {
   display: grid;
-  grid-template-columns: 168px minmax(0, 1fr);
+  grid-template-columns: var(--side-w, 168px) minmax(0, 1fr);
   gap: 0;
   align-items: stretch;
   /* 抵消壳层 content 内边距，左右贴边 */
@@ -1908,6 +1943,8 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   position: sticky;
   top: 0;
   min-height: calc(100vh - 44px);
+  max-height: calc(100vh - 44px);
+  overflow: hidden;
   padding: 14px 10px;
   border: none;
   border-right: 1px solid var(--np-border);
@@ -1917,16 +1954,122 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   box-shadow: none;
 }
 
+.side-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.side-resize::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+}
+
+.side-resize:hover::after,
+.page.is-resizing .side-resize::after {
+  background: var(--np-accent);
+}
+
+.page.is-resizing,
+.page.is-resizing * {
+  cursor: col-resize;
+  user-select: none;
+}
+
 .side-nav {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.side-foot {
-  margin-top: 8px;
+.side-log {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-top: 4px;
   padding-top: 10px;
   border-top: 1px solid var(--np-border);
+}
+
+.side-log h3 {
+  margin: 0 4px 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--np-text-muted);
+}
+
+.side-log-empty {
+  margin: 0 4px;
+  font-size: 12px;
+  color: var(--np-text-muted);
+}
+
+.side-log-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  min-height: 0;
+}
+
+.side-log-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 6px;
+  border: none;
+  border-radius: var(--np-radius-sm);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.side-log-item:hover {
+  background: color-mix(in srgb, var(--np-accent-muted) 55%, transparent);
+}
+
+.side-log-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  font-size: 11px;
+  color: var(--np-text-muted);
+}
+
+.side-log-meta strong {
+  color: var(--np-text);
+  font-size: 12px;
+}
+
+.side-log-key {
+  margin-right: 4px;
+  font-weight: 700;
+  color: var(--np-accent);
+}
+
+.side-log-sum {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--np-text-secondary);
 }
 
 .side-item {
@@ -2121,6 +2264,8 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   .side {
     position: static;
     min-height: auto;
+    max-height: none;
+    overflow: visible;
     padding: 10px;
     border: none;
     border-bottom: 1px solid var(--np-border);
@@ -2163,6 +2308,14 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
 
   .side-item.is-on {
     box-shadow: inset 0 -3px 0 var(--np-accent);
+  }
+
+  .side-log {
+    max-height: 240px;
+  }
+
+  .side-resize {
+    display: none;
   }
 }
 

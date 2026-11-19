@@ -121,7 +121,7 @@ onMounted(() => {
                 variant="ghost"
                 @click.stop="openEdit(p)"
               >
-                编辑
+                编辑项目
               </NpButton>
               <span v-else class="muted">—</span>
             </td>

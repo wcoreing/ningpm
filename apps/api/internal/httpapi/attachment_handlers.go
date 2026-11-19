@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -195,7 +196,8 @@ func (s *Server) handleAddIssueAttachment(c *gin.Context) {
 		resourceID = strings.TrimSpace(req.ResourceID)
 	}
 
-	a, err := s.store.AttachResourceToIssue(issueID, resourceID, currentUserID(c))
+	actorID := currentUserID(c)
+	a, err := s.store.AttachResourceToIssue(issueID, resourceID, actorID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			Fail(c, http.StatusNotFound, "资源不存在")
@@ -204,6 +206,7 @@ func (s *Server) handleAddIssueAttachment(c *gin.Context) {
 		Fail(c, http.StatusConflict, "挂接附件失败（可能已存在）")
 		return
 	}
+	s.recordIssueEvent("ev-attach-"+a.ID, issueID, actorID, "attachment", "上传了附件「"+clipRunes(a.OriginalName, 40)+"」", a.CreatedAt)
 	OK(c, a)
 }
 
@@ -222,6 +225,15 @@ func (s *Server) handleRemoveIssueAttachment(c *gin.Context) {
 	if !s.requireWrite(c, it.ProjectID) {
 		return
 	}
+	existing, err := s.store.GetIssueAttachment(issueID, attachmentID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			Fail(c, http.StatusNotFound, "附件不存在")
+			return
+		}
+		Fail(c, http.StatusInternalServerError, "加载附件失败")
+		return
+	}
 	if err := s.store.DetachIssueAttachment(issueID, attachmentID); err != nil {
 		if err == sql.ErrNoRows {
 			Fail(c, http.StatusNotFound, "附件不存在")
@@ -230,5 +242,6 @@ func (s *Server) handleRemoveIssueAttachment(c *gin.Context) {
 		Fail(c, http.StatusInternalServerError, "删除附件失败")
 		return
 	}
+	s.recordIssueEvent("", issueID, currentUserID(c), "attachment", "删除了附件「"+clipRunes(existing.OriginalName, 40)+"」", time.Now().UTC())
 	OK(c, gin.H{"removed": true})
 }
