@@ -953,13 +953,12 @@ func (s *Store) UpdateUserName(userID, name string) (*user.User, error) {
 	if name == "" {
 		return nil, fmt.Errorf("name required")
 	}
-	res, err := s.db.Exec(`UPDATE users SET name=? WHERE id=?`, name, userID)
-	if err != nil {
+	// 先确认用户存在；勿用 RowsAffected==0 判不存在（MySQL 同值 UPDATE 常返回 0）
+	if _, err := s.GetUserByID(userID); err != nil {
 		return nil, err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return nil, sql.ErrNoRows
+	if _, err := s.db.Exec(`UPDATE users SET name=? WHERE id=?`, name, userID); err != nil {
+		return nil, err
 	}
 	return s.GetUserByID(userID)
 }
