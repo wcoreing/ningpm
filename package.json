@@ -1,7 +1,7 @@
 {
   "name": "ningpm",
   "private": true,
-  "version": "0.25.18",
+  "version": "0.25.39",
   "packageManager": "pnpm@11.28.5",
   "scripts": {
     "dev": "pnpm --filter @ningpm/web dev",

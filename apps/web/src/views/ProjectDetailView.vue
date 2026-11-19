@@ -22,6 +22,15 @@ import {
   priorityTone,
   typeTone,
 } from "../lib/labels"
+import {
+  addDaysISO,
+  dayOffset,
+  enumerateDays,
+  formatDueLabel,
+  isDueThisWeek,
+  isOverdue,
+  todayISO,
+} from "../lib/schedule"
 import type { Cycle, Issue, Module, UserOption } from "../types"
 import { exportProjectReport } from "../lib/reportExport"
 import { useAuthStore } from "../stores/auth"
@@ -56,19 +65,28 @@ const {
   canLeaveProject,
 } = storeToRefs(projectStore)
 
-/** board | list | tree | cycles | reports | members | files */
+/** board | list | tree | schedule | cycles | reports | members | files */
 const view = ref("board")
 /** 工作区上次用的展示方式（从迭代/成员/文件/报表返回时恢复） */
-const workMode = ref<"board" | "list" | "tree">("board")
+const workMode = ref<"board" | "list" | "tree" | "schedule">("board")
 const typeFilter = ref("all")
 const statusFilter = ref("all") // all | todo | doing | review | done
+const dueFilter = ref("all") // all | overdue | week | none
 const cycleFilter = ref("all") // all | active | backlog | <cycleId>
 const moduleFilter = ref("all")
+const scheduleSpan = ref<"week" | "month">("week")
+const scheduleAnchor = ref(todayISO())
 const attachmentsPanel = ref<{ reload: () => Promise<void> } | null>(null)
 /** 树形视图：折叠的根事项 id */
 const treeCollapsed = ref<Set<string>>(new Set())
 
-const isWork = computed(() => view.value === "board" || view.value === "list" || view.value === "tree")
+const isWork = computed(
+  () =>
+    view.value === "board" ||
+    view.value === "list" ||
+    view.value === "tree" ||
+    view.value === "schedule",
+)
 const sideNav = computed(() => (isWork.value ? "work" : view.value))
 
 const sideItems = [
@@ -132,14 +150,21 @@ const statusTabs = [
   ...STATUS_ORDER.map((status) => ({ value: status, label: STATUS_LABELS[status] })),
 ]
 
+const dueTabs = [
+  { value: "all", label: "全部到期" },
+  { value: "overdue", label: "已逾期" },
+  { value: "week", label: "本周到期" },
+  { value: "none", label: "未排期" },
+]
+
 const memberIdSet = computed(() => new Set(members.value.map((m) => m.userId)))
 
 function userMatchesQuery(u: UserOption, q: string) {
   if (!q) return true
   const name = u.name.toLowerCase()
-  const email = u.email.toLowerCase()
-  const local = email.split("@")[0] || ""
-  return name.includes(q) || local.includes(q) || email.startsWith(q)
+  const account = (u.account || u.email || "").toLowerCase()
+  const local = account.split("@")[0] || ""
+  return name.includes(q) || local.includes(q) || account.startsWith(q) || account.includes(q)
 }
 
 const inviteCandidates = computed(() => {
@@ -165,15 +190,21 @@ const matchedInviteUser = computed(() => {
   if (!q) return null
   return (
     allUsers.value.find(
-      (u) => !memberIdSet.value.has(u.id) && (u.email.toLowerCase() === q || u.name.toLowerCase() === q),
+      (u) =>
+        !memberIdSet.value.has(u.id) &&
+        ((u.account || "").toLowerCase() === q ||
+          (u.email || "").toLowerCase() === q ||
+          u.name.toLowerCase() === q),
     ) || null
   )
 })
 
-const canInviteNewEmail = computed(() => {
+const canInviteNewAccount = computed(() => {
   const q = inviteQuery.value.trim().toLowerCase()
-  if (!q.includes("@") || matchedInviteUser.value) return false
-  const existing = allUsers.value.find((u) => u.email.toLowerCase() === q)
+  if (!q || matchedInviteUser.value) return false
+  const existing = allUsers.value.find(
+    (u) => (u.account || "").toLowerCase() === q || (u.email || "").toLowerCase() === q,
+  )
   if (existing && memberIdSet.value.has(existing.id)) return false
   return !existing
 })
@@ -183,7 +214,7 @@ const inviteMenuVisible = computed(
     inviteOpen.value &&
     (inviteCandidates.value.length > 0 ||
       inviteAlreadyMembers.value.length > 0 ||
-      canInviteNewEmail.value ||
+      canInviteNewAccount.value ||
       Boolean(inviteQuery.value.trim())),
 )
 
@@ -222,6 +253,13 @@ const filtered = computed(() => {
   }
   if (moduleFilter.value !== "all") {
     list = list.filter((i) => i.moduleId === moduleFilter.value)
+  }
+  if (dueFilter.value === "overdue") {
+    list = list.filter((i) => isOverdue(i.dueDate, i.status))
+  } else if (dueFilter.value === "week") {
+    list = list.filter((i) => isDueThisWeek(i.dueDate))
+  } else if (dueFilter.value === "none") {
+    list = list.filter((i) => !i.dueDate)
   }
   return list
 })
@@ -367,6 +405,13 @@ async function exportReport() {
   }
 }
 
+function boardSort(a: Issue, b: Issue) {
+  const ao = a.boardOrder ?? 0
+  const bo = b.boardOrder ?? 0
+  if (ao !== bo) return bo - ao
+  return (b.updatedAt || "").localeCompare(a.updatedAt || "")
+}
+
 const columns = computed(() => {
   const statuses =
     statusFilter.value === "all"
@@ -375,7 +420,7 @@ const columns = computed(() => {
   return statuses.map((status) => ({
     status,
     label: STATUS_LABELS[status],
-    items: filtered.value.filter((i) => i.status === status),
+    items: filtered.value.filter((i) => i.status === status).sort(boardSort),
   }))
 })
 
@@ -442,6 +487,131 @@ function childProgressPct(done: number, total: number) {
   return Math.round((done / total) * 100)
 }
 
+/** 看板卡片上的紧凑「最后更新」文案 */
+function formatUpdatedLabel(iso?: string) {
+  if (!iso) return ""
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ""
+  const now = new Date()
+  const diffMs = now.getTime() - d.getTime()
+  const abs = Math.abs(diffMs)
+  if (abs < 60_000) return "刚刚"
+  if (abs < 3600_000) return `${Math.floor(abs / 60_000)} 分钟前`
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+  if (sameDay) return `今天 ${hm}`
+  const yest = new Date(now)
+  yest.setDate(now.getDate() - 1)
+  if (
+    d.getFullYear() === yest.getFullYear() &&
+    d.getMonth() === yest.getMonth() &&
+    d.getDate() === yest.getDate()
+  ) {
+    return `昨天 ${hm}`
+  }
+  if (d.getFullYear() === now.getFullYear()) {
+    return `${d.getMonth() + 1}/${d.getDate()} ${hm}`
+  }
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
+}
+
+function formatUpdatedFull(iso?: string) {
+  if (!iso) return ""
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString("zh-CN", { hour12: false })
+}
+
+function dueClass(it: Issue) {
+  if (!it.dueDate) return ""
+  if (isOverdue(it.dueDate, it.status)) return "is-overdue"
+  if (isDueThisWeek(it.dueDate)) return "is-due-soon"
+  return ""
+}
+
+const scheduleDayCount = computed(() => (scheduleSpan.value === "week" ? 14 : 42))
+
+const scheduleRangeStart = computed(() => {
+  const anchor = scheduleAnchor.value || todayISO()
+  if (scheduleSpan.value === "week") {
+    const d = new Date(`${anchor}T00:00:00`)
+    const day = d.getDay() || 7
+    d.setDate(d.getDate() - day + 1)
+    return todayISO(d)
+  }
+  const d = new Date(`${anchor}T00:00:00`)
+  d.setDate(1)
+  return todayISO(d)
+})
+
+const scheduleDays = computed(() => enumerateDays(scheduleRangeStart.value, scheduleDayCount.value))
+
+type ScheduleRow = {
+  issue: Issue
+  depth: number
+  barStart: number
+  barSpan: number
+  hasBar: boolean
+  overdue: boolean
+}
+
+/** 排期：根事项 + 子事项；无日期的仍占行便于发现未排期 */
+const scheduleRows = computed((): ScheduleRow[] => {
+  const byParent = new Map<string, Issue[]>()
+  for (const it of issues.value) {
+    if (!it.parentId) continue
+    const list = byParent.get(it.parentId)
+    if (list) list.push(it)
+    else byParent.set(it.parentId, [it])
+  }
+  const start = scheduleRangeStart.value
+  const days = scheduleDayCount.value
+  const rows: ScheduleRow[] = []
+
+  function barFor(it: Issue) {
+    const due = it.dueDate?.slice(0, 10) || ""
+    const begin = (it.startDate || due).slice(0, 10)
+    if (!due && !it.startDate) {
+      return { barStart: 0, barSpan: 0, hasBar: false, overdue: false }
+    }
+    const end = due || begin
+    let left = dayOffset(start, begin)
+    let right = dayOffset(start, end)
+    if (right < left) right = left
+    const clippedLeft = Math.max(0, left)
+    const clippedRight = Math.min(days - 1, right)
+    if (clippedRight < 0 || clippedLeft >= days) {
+      return { barStart: 0, barSpan: 0, hasBar: false, overdue: isOverdue(it.dueDate, it.status) }
+    }
+    return {
+      barStart: clippedLeft,
+      barSpan: Math.max(1, clippedRight - clippedLeft + 1),
+      hasBar: true,
+      overdue: isOverdue(it.dueDate, it.status),
+    }
+  }
+
+  for (const root of filtered.value) {
+    const kids = (byParent.get(root.id) || []).slice().sort((a, b) => a.number - b.number)
+    rows.push({ issue: root, depth: 0, ...barFor(root) })
+    for (const child of kids) {
+      rows.push({ issue: child, depth: 1, ...barFor(child) })
+    }
+  }
+  return rows
+})
+
+function shiftSchedule(delta: number) {
+  scheduleAnchor.value = addDaysISO(scheduleAnchor.value || todayISO(), delta)
+}
+
+function resetScheduleToday() {
+  scheduleAnchor.value = todayISO()
+}
+
 function defaultWeekRange() {
   const now = new Date()
   const day = now.getDay() || 7
@@ -456,10 +626,14 @@ function defaultWeekRange() {
 function syncPageHeader() {
   const p = project.value
   if (!p) return
+  // 工作区（看板/列表/树形/排期）标题进面板顶栏，壳层只保留导航默认标题
+  if (isWork.value) {
+    pageHeader.clear()
+    return
+  }
   pageHeader.set({
     title: p.name,
     badge: p.key,
-    subtitle: p.description || "",
   })
 }
 
@@ -511,7 +685,7 @@ async function load() {
 
 function pickInviteUser(u: UserOption) {
   selectedUserId.value = u.id
-  inviteQuery.value = `${u.name} <${u.email}>`
+  inviteQuery.value = `${u.name} <${u.account}>`
   inviteOpen.value = false
 }
 
@@ -523,28 +697,24 @@ function onInviteInput() {
 watch(inviteQuery, () => {
   if (selectedUserId.value) {
     const picked = allUsers.value.find((u) => u.id === selectedUserId.value)
-    const label = picked ? `${picked.name} <${picked.email}>` : ""
+    const label = picked ? `${picked.name} <${picked.account}>` : ""
     if (inviteQuery.value === label) return
     selectedUserId.value = ""
   }
   inviteOpen.value = true
 })
 
-function parseInviteEmail(raw: string) {
-  const angled = raw.match(/<([^>]+@[^>]+)>/)
+function parseInviteAccount(raw: string) {
+  const angled = raw.match(/<([^>]+)>/)
   if (angled?.[1]) return angled[1].trim()
   return raw.trim()
 }
 
 async function addMember() {
   const matched = matchedInviteUser.value
-  const email = matched?.email || parseInviteEmail(inviteQuery.value)
-  if (!email) {
-    toast.warning("请输入邮箱或选择系统账号")
-    return
-  }
-  if (!matched && !email.includes("@")) {
-    toast.warning("未匹配到账号时，请输入完整邮箱")
+  const account = matched?.account || parseInviteAccount(inviteQuery.value)
+  if (!account) {
+    toast.warning("请输入账号或选择系统用户")
     return
   }
   memberSaving.value = true
@@ -552,10 +722,10 @@ async function addMember() {
   try {
     const body = matched
       ? { userId: matched.id, role: addRole.value }
-      : { email, role: addRole.value }
+      : { account, role: addRole.value }
     const res = await projectStore.addMember(body)
     if (res.createdUser && res.temporaryPassword) {
-      inviteHint.value = `已创建账号 ${res.member.email}，临时密码：${res.temporaryPassword}（请自行告知对方并尽快修改）`
+      inviteHint.value = `已创建账号 ${res.member.account}，临时密码：${res.temporaryPassword}（请自行告知对方并尽快修改）`
       toast.success(`已邀请 ${res.member.name}，请复制临时密码`)
     } else {
       toast.success(`已添加 ${res.member.name}`)
@@ -665,18 +835,113 @@ async function moveIssue(issueId: string, status: string) {
   }
 }
 
-function onDrop(status: string, event: DragEvent) {
-  event.preventDefault()
-  const id = event.dataTransfer?.getData("text/issue-id")
-  if (!id) return
-  const current = issues.value.find((i) => i.id === id)
-  if (!current || current.status === status) return
-  void moveIssue(id, status)
-}
+const dragIssueId = ref("")
+const dropOverId = ref("") // 悬停目标卡片（插入其上方）
+const dropOverStatus = ref("")
+const dragMoved = ref(false)
 
 function onDragStart(issueId: string, event: DragEvent) {
+  dragIssueId.value = issueId
+  dropOverId.value = ""
+  dropOverStatus.value = ""
+  dragMoved.value = false
   event.dataTransfer?.setData("text/issue-id", issueId)
   event.dataTransfer!.effectAllowed = "move"
+}
+
+function onDragEnd() {
+  dragIssueId.value = ""
+  dropOverId.value = ""
+  dropOverStatus.value = ""
+}
+
+function onCardDragOver(status: string, targetId: string, event: DragEvent) {
+  event.preventDefault()
+  event.stopPropagation()
+  if (!dragIssueId.value || dragIssueId.value === targetId) return
+  dragMoved.value = true
+  dropOverStatus.value = status
+  dropOverId.value = targetId
+}
+
+function onColumnDragOver(status: string, event: DragEvent) {
+  event.preventDefault()
+  if (!dragIssueId.value) return
+  dragMoved.value = true
+  dropOverStatus.value = status
+  // 悬停在泳道空白处：清掉卡片锚点，松手后置顶或落到末尾由落点逻辑处理
+  dropOverId.value = ""
+}
+
+async function applyBoardDrop(status: string, afterId?: string) {
+  const id = dragIssueId.value
+  if (!id) return
+  const colItems = filtered.value.filter((i) => i.status === status && i.id !== id).sort(boardSort)
+  const resolvedAfter = afterId && afterId !== id ? afterId : undefined
+  let beforeId: string | undefined
+  if (resolvedAfter) {
+    const idx = colItems.findIndex((i) => i.id === resolvedAfter)
+    if (idx > 0) beforeId = colItems[idx - 1]?.id
+  }
+  // 泳道空白：置顶（与「默认按最后修改」一致）；拖到卡片上则插到该卡上方
+
+  const full = filtered.value.filter((i) => i.status === status).sort(boardSort)
+  const curIdx = full.findIndex((i) => i.id === id)
+  if (curIdx >= 0) {
+    if (resolvedAfter && curIdx === full.findIndex((i) => i.id === resolvedAfter) - 1) {
+      onDragEnd()
+      return
+    }
+    if (!resolvedAfter && curIdx === 0) {
+      onDragEnd()
+      return
+    }
+  }
+
+  try {
+    await projectStore.reorderBoard(id, {
+      status,
+      beforeId,
+      afterId: resolvedAfter,
+    })
+  } catch {
+    /* store rolled back */
+  } finally {
+    onDragEnd()
+  }
+}
+
+function onCardDrop(status: string, targetId: string, event: DragEvent) {
+  event.preventDefault()
+  event.stopPropagation()
+  const id = event.dataTransfer?.getData("text/issue-id") || dragIssueId.value
+  if (!id || id === targetId) {
+    onDragEnd()
+    return
+  }
+  dragIssueId.value = id
+  void applyBoardDrop(status, targetId)
+}
+
+function onColumnDrop(status: string, event: DragEvent) {
+  event.preventDefault()
+  const id = event.dataTransfer?.getData("text/issue-id") || dragIssueId.value
+  if (!id) {
+    onDragEnd()
+    return
+  }
+  dragIssueId.value = id
+  // 若松手前悬停在某卡片上，按卡片落点；否则落到泳道末尾
+  const after = dropOverId.value && dropOverStatus.value === status ? dropOverId.value : undefined
+  void applyBoardDrop(status, after)
+}
+
+function onCardClick(issueId: string) {
+  if (dragMoved.value) {
+    dragMoved.value = false
+    return
+  }
+  openDetail(issueId)
 }
 
 function memberById(userId?: string) {
@@ -700,7 +965,8 @@ function onIssueUpdated(updated: Issue) {
 
 watch(view, (v) => {
   if (v === "modules") view.value = "board"
-  if (v === "board" || v === "list" || v === "tree") workMode.value = v
+  if (v === "board" || v === "list" || v === "tree" || v === "schedule") workMode.value = v
+  syncPageHeader()
 })
 
 function openIssueFromQuery() {
@@ -731,9 +997,8 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
 </script>
 
 <template>
-  <div class="page">
+  <div class="page" :class="{ 'page--board': view === 'board' }">
     <aside class="side" aria-label="项目菜单">
-      <p class="side-label">项目</p>
       <nav class="side-nav">
         <button
           v-for="item in sideItems"
@@ -789,79 +1054,101 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
         </div>
       </div>
 
-      <div v-if="isWork" class="filter-bar">
-        <div class="filter-groups">
-          <div class="filter-group">
-            <span class="filter-label">迭代</span>
-            <NpSelect v-model="cycleFilter" size="sm">
-              <option v-for="t in cycleFilterTabs" :key="t.value" :value="t.value">{{ t.label }}</option>
-            </NpSelect>
-          </div>
-          <div class="filter-group">
-            <span class="filter-label">模块</span>
-            <NpSelect v-model="moduleFilter" size="sm">
-              <option value="all">全部模块</option>
-              <option v-for="md in modules" :key="md.id" :value="md.id">{{ md.name }}</option>
-            </NpSelect>
-          </div>
-          <div class="filter-group">
-            <span class="filter-label">类型</span>
-            <NpSelect v-model="typeFilter" size="sm">
-              <option v-for="t in typeTabs" :key="t.value" :value="t.value">{{ t.label }}</option>
-            </NpSelect>
-          </div>
-          <div class="filter-group">
-            <span class="filter-label">状态</span>
-            <NpSelect v-model="statusFilter" size="sm">
-              <option v-for="t in statusTabs" :key="t.value" :value="t.value">{{ t.label }}</option>
-            </NpSelect>
-          </div>
-        </div>
-        <NpButton size="sm" variant="primary" :disabled="!canWrite" @click="open = true">
-          新建事项
-        </NpButton>
-      </div>
-
       <p v-if="error" class="error">{{ error }}</p>
       <p v-if="loading" class="muted">加载中…</p>
 
       <template v-else>
       <div v-if="isWork" class="data-panel">
         <div class="data-head">
-          <div class="view-switch" role="tablist" aria-label="展示方式">
-            <button
-              type="button"
-              class="view-btn"
-              :class="{ 'is-on': view === 'board' }"
-              role="tab"
-              :aria-selected="view === 'board'"
-              title="看板"
-              @click="view = 'board'"
-            >
-              <span>看板</span>
-            </button>
-            <button
-              type="button"
-              class="view-btn"
-              :class="{ 'is-on': view === 'list' }"
-              role="tab"
-              :aria-selected="view === 'list'"
-              title="列表"
-              @click="view = 'list'"
-            >
-              <span>列表</span>
-            </button>
-            <button
-              type="button"
-              class="view-btn"
-              :class="{ 'is-on': view === 'tree' }"
-              role="tab"
-              :aria-selected="view === 'tree'"
-              title="树形"
-              @click="view = 'tree'"
-            >
-              <span>树形</span>
-            </button>
+          <div class="panel-lead">
+            <div v-if="project" class="panel-identity" :title="project.description || project.name">
+              <NpBadge tone="accent">{{ project.key }}</NpBadge>
+              <h2 class="panel-identity__title">{{ project.name }}</h2>
+            </div>
+            <div class="view-switch" role="tablist" aria-label="展示方式">
+              <button
+                type="button"
+                class="view-btn"
+                :class="{ 'is-on': view === 'board' }"
+                role="tab"
+                :aria-selected="view === 'board'"
+                title="看板"
+                @click="view = 'board'"
+              >
+                <span>看板</span>
+              </button>
+              <button
+                type="button"
+                class="view-btn"
+                :class="{ 'is-on': view === 'list' }"
+                role="tab"
+                :aria-selected="view === 'list'"
+                title="列表"
+                @click="view = 'list'"
+              >
+                <span>列表</span>
+              </button>
+              <button
+                type="button"
+                class="view-btn"
+                :class="{ 'is-on': view === 'tree' }"
+                role="tab"
+                :aria-selected="view === 'tree'"
+                title="树形"
+                @click="view = 'tree'"
+              >
+                <span>树形</span>
+              </button>
+              <button
+                type="button"
+                class="view-btn"
+                :class="{ 'is-on': view === 'schedule' }"
+                role="tab"
+                :aria-selected="view === 'schedule'"
+                title="排期"
+                @click="view = 'schedule'"
+              >
+                <span>排期</span>
+              </button>
+            </div>
+          </div>
+          <div class="panel-tools">
+            <div class="filter-groups">
+              <div class="filter-group">
+                <span class="filter-label">迭代</span>
+                <NpSelect v-model="cycleFilter" size="sm">
+                  <option v-for="t in cycleFilterTabs" :key="t.value" :value="t.value">{{ t.label }}</option>
+                </NpSelect>
+              </div>
+              <div class="filter-group">
+                <span class="filter-label">模块</span>
+                <NpSelect v-model="moduleFilter" size="sm">
+                  <option value="all">全部模块</option>
+                  <option v-for="md in modules" :key="md.id" :value="md.id">{{ md.name }}</option>
+                </NpSelect>
+              </div>
+              <div class="filter-group">
+                <span class="filter-label">类型</span>
+                <NpSelect v-model="typeFilter" size="sm">
+                  <option v-for="t in typeTabs" :key="t.value" :value="t.value">{{ t.label }}</option>
+                </NpSelect>
+              </div>
+              <div class="filter-group">
+                <span class="filter-label">状态</span>
+                <NpSelect v-model="statusFilter" size="sm">
+                  <option v-for="t in statusTabs" :key="t.value" :value="t.value">{{ t.label }}</option>
+                </NpSelect>
+              </div>
+              <div class="filter-group">
+                <span class="filter-label">到期</span>
+                <NpSelect v-model="dueFilter" size="sm">
+                  <option v-for="t in dueTabs" :key="t.value" :value="t.value">{{ t.label }}</option>
+                </NpSelect>
+              </div>
+            </div>
+            <NpButton size="sm" variant="primary" :disabled="!canWrite" @click="open = true">
+              新建事项
+            </NpButton>
           </div>
         </div>
 
@@ -874,39 +1161,79 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
             v-for="col in columns"
             :key="col.status"
             class="column"
-            @dragover.prevent
-            @drop="onDrop(col.status, $event)"
+            @dragover="onColumnDragOver(col.status, $event)"
+            @drop="onColumnDrop(col.status, $event)"
           >
             <header>
               <strong>{{ col.label }}</strong>
               <span>{{ col.items.length }}</span>
             </header>
+            <div class="column-cards">
             <article
               v-for="it in col.items"
               :key="it.id"
               class="card"
+              :class="{
+                'is-dragging': dragIssueId === it.id,
+                'is-drop-target': dropOverId === it.id && dragIssueId !== it.id,
+              }"
               draggable="true"
               @dragstart="onDragStart(it.id, $event)"
-              @click="openDetail(it.id)"
+              @dragend="onDragEnd"
+              @dragover="onCardDragOver(col.status, it.id, $event)"
+              @drop="onCardDrop(col.status, it.id, $event)"
+              @click="onCardClick(it.id)"
             >
-              <div class="card-row card-row--title">
-                <h4>{{ it.title }}</h4>
+              <div class="card-row card-row--main">
+                <span class="key">{{ it.key }}</span>
+                <h4 :title="it.title">{{ it.title }}</h4>
+                <NpBadge :tone="typeTone(it.type)">{{ TYPE_LABELS[it.type] }}</NpBadge>
+                <NpBadge :tone="priorityTone(it.priority)">{{ PRIORITY_LABELS[it.priority] }}</NpBadge>
+                <span
+                  v-if="it.dueDate"
+                  class="due-pill"
+                  :class="dueClass(it)"
+                  :title="`截止 ${formatDueLabel(it.dueDate)}`"
+                >{{ formatDueLabel(it.dueDate) }}</span>
+                <span v-if="it.attachmentCount" class="att-pill" title="附件数">附 {{ it.attachmentCount }}</span>
                 <UserAvatar
                   v-if="it.assigneeId"
                   :name="memberById(it.assigneeId)?.name || it.assigneeName"
-                  :email="memberById(it.assigneeId)?.email"
+                  :account="memberById(it.assigneeId)?.account"
                   :avatar-url="memberById(it.assigneeId)?.avatarUrl"
                   size="sm"
                 />
               </div>
-              <div class="card-row card-row--meta">
-                <span class="key">{{ it.key }}</span>
-                <NpBadge :tone="typeTone(it.type)">{{ TYPE_LABELS[it.type] }}</NpBadge>
-                <NpBadge :tone="priorityTone(it.priority)">{{ PRIORITY_LABELS[it.priority] }}</NpBadge>
-                <span v-if="it.childCount" class="child-pill">{{ it.childDoneCount || 0 }}/{{ it.childCount }}</span>
-                <span v-if="it.attachmentCount" class="att-pill" title="附件数">附 {{ it.attachmentCount }}</span>
+              <div
+                v-if="it.childCount || it.updatedAt"
+                class="card-row card-row--foot"
+              >
+                <div v-if="it.childCount" class="card-progress">
+                  <div
+                    class="card-progress__bar"
+                    role="progressbar"
+                    :aria-valuenow="childProgressPct(it.childDoneCount || 0, it.childCount)"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    :title="`${it.childDoneCount || 0}/${it.childCount}`"
+                  >
+                    <span
+                      class="card-progress__fill"
+                      :style="{ width: `${childProgressPct(it.childDoneCount || 0, it.childCount)}%` }"
+                    />
+                  </div>
+                  <span class="card-progress__label">{{ it.childDoneCount || 0 }}/{{ it.childCount }}</span>
+                </div>
+                <div
+                  v-if="it.updatedAt"
+                  class="card-updated"
+                  :title="`最后更新 ${formatUpdatedFull(it.updatedAt)}`"
+                >
+                  更新 {{ formatUpdatedLabel(it.updatedAt) }}
+                </div>
               </div>
             </article>
+            </div>
           </section>
         </div>
 
@@ -914,6 +1241,7 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
           <div class="tree-head" aria-hidden="true">
             <span class="tree-col tree-col--title">事项</span>
             <span class="tree-col tree-col--progress">子项进度</span>
+            <span class="tree-col tree-col--due">截止</span>
             <span class="tree-col tree-col--status">状态</span>
             <span class="tree-col tree-col--assignee">指派</span>
           </div>
@@ -974,6 +1302,14 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
                 </template>
                 <span v-else class="muted">—</span>
               </div>
+              <div class="tree-col tree-col--due">
+                <span
+                  v-if="row.issue.dueDate"
+                  class="due-pill"
+                  :class="dueClass(row.issue)"
+                >{{ formatDueLabel(row.issue.dueDate) }}</span>
+                <span v-else class="muted">—</span>
+              </div>
               <div
                 class="tree-col tree-col--status"
                 :class="`status-select--${row.issue.status}`"
@@ -993,7 +1329,7 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
                   <UserAvatar
                     v-if="row.issue.assigneeId"
                     :name="memberById(row.issue.assigneeId)?.name || row.issue.assigneeName"
-                    :email="memberById(row.issue.assigneeId)?.email"
+                    :account="memberById(row.issue.assigneeId)?.account"
                     :avatar-url="memberById(row.issue.assigneeId)?.avatarUrl"
                     size="sm"
                   />
@@ -1005,6 +1341,97 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
           <p v-if="!treeRows.length" class="muted empty">暂无事项</p>
         </div>
 
+        <div v-else-if="view === 'schedule'" class="schedule-wrap">
+          <div class="schedule-toolbar">
+            <div class="schedule-nav">
+              <NpButton size="sm" variant="ghost" @click="shiftSchedule(scheduleSpan === 'week' ? -14 : -30)">
+                上一{{ scheduleSpan === "week" ? "段" : "月" }}
+              </NpButton>
+              <NpButton size="sm" variant="ghost" @click="resetScheduleToday">今天</NpButton>
+              <NpButton size="sm" variant="ghost" @click="shiftSchedule(scheduleSpan === 'week' ? 14 : 30)">
+                下一{{ scheduleSpan === "week" ? "段" : "月" }}
+              </NpButton>
+              <span class="schedule-range muted">
+                {{ scheduleRangeStart }} ~ {{ scheduleDays[scheduleDays.length - 1] }}
+              </span>
+            </div>
+            <div class="view-switch" role="tablist" aria-label="排期跨度">
+              <button
+                type="button"
+                class="view-btn"
+                :class="{ 'is-on': scheduleSpan === 'week' }"
+                @click="scheduleSpan = 'week'"
+              >
+                两周
+              </button>
+              <button
+                type="button"
+                class="view-btn"
+                :class="{ 'is-on': scheduleSpan === 'month' }"
+                @click="scheduleSpan = 'month'"
+              >
+                月
+              </button>
+            </div>
+          </div>
+          <div class="schedule-scroll">
+            <div
+              class="schedule-grid"
+              :style="{ '--sched-days': String(scheduleDayCount) }"
+            >
+              <div class="schedule-corner">事项</div>
+              <div
+                v-for="d in scheduleDays"
+                :key="d"
+                class="schedule-dayhead"
+                :class="{ 'is-today': d === todayISO() }"
+              >
+                <span class="schedule-dayhead__md">{{ d.slice(5) }}</span>
+              </div>
+              <template v-for="row in scheduleRows" :key="row.issue.id">
+                <button
+                  type="button"
+                  class="schedule-label"
+                  :class="{ 'is-child': row.depth > 0 }"
+                  :style="{ paddingLeft: `${10 + row.depth * 14}px` }"
+                  @click="openDetail(row.issue.id)"
+                >
+                  <span class="key">{{ row.issue.key }}</span>
+                  <span class="schedule-label__title">{{ row.issue.title }}</span>
+                  <span
+                    v-if="row.issue.dueDate"
+                    class="due-pill"
+                    :class="dueClass(row.issue)"
+                  >{{ formatDueLabel(row.issue.dueDate) }}</span>
+                </button>
+                <div class="schedule-track" @click="openDetail(row.issue.id)">
+                  <span
+                    v-for="d in scheduleDays"
+                    :key="`${row.issue.id}-${d}`"
+                    class="schedule-cell"
+                    :class="{ 'is-today': d === todayISO() }"
+                  />
+                  <span
+                    v-if="row.hasBar"
+                    class="schedule-bar"
+                    :class="{
+                      'is-overdue': row.overdue,
+                      'is-done': row.issue.status === 'done',
+                      [`is-status-${row.issue.status}`]: true,
+                    }"
+                    :style="{
+                      left: `${(row.barStart / scheduleDayCount) * 100}%`,
+                      width: `${(row.barSpan / scheduleDayCount) * 100}%`,
+                    }"
+                    :title="`${row.issue.startDate || row.issue.dueDate || ''} → ${row.issue.dueDate || ''}`"
+                  />
+                </div>
+              </template>
+            </div>
+            <p v-if="!scheduleRows.length" class="muted empty">暂无事项</p>
+          </div>
+        </div>
+
         <div v-else class="table-wrap">
           <table class="table">
             <thead>
@@ -1012,6 +1439,7 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
                 <th>编号</th>
                 <th>类型</th>
                 <th>标题</th>
+                <th>截止</th>
                 <th>子项</th>
                 <th>附件</th>
                 <th>模块</th>
@@ -1025,6 +1453,14 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
                 <td class="key">{{ it.key }}</td>
                 <td><NpBadge :tone="typeTone(it.type)">{{ TYPE_LABELS[it.type] }}</NpBadge></td>
                 <td>{{ it.title }}</td>
+                <td class="nowrap">
+                  <span
+                    v-if="it.dueDate"
+                    class="due-pill"
+                    :class="dueClass(it)"
+                  >{{ formatDueLabel(it.dueDate) }}</span>
+                  <span v-else class="muted">—</span>
+                </td>
                 <td class="nowrap">
                   <span v-if="it.childCount">{{ it.childDoneCount || 0 }}/{{ it.childCount }}</span>
                   <span v-else class="muted">—</span>
@@ -1273,10 +1709,10 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
                   class="invite-option"
                   @mousedown.prevent="pickInviteUser(u)"
                 >
-                  <UserAvatar :name="u.name" :email="u.email" :avatar-url="u.avatarUrl" size="sm" />
+                  <UserAvatar :name="u.name" :account="u.account" :avatar-url="u.avatarUrl" size="sm" />
                   <span class="invite-option__text">
                     <strong>{{ u.name }}</strong>
-                    <span>{{ u.email }}</span>
+                    <span>{{ u.account }}</span>
                   </span>
                 </button>
                 <div
@@ -1284,14 +1720,14 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
                   :key="`m-${u.id}`"
                   class="invite-option invite-option--disabled"
                 >
-                  <UserAvatar :name="u.name" :email="u.email" :avatar-url="u.avatarUrl" size="sm" />
+                  <UserAvatar :name="u.name" :account="u.account" :avatar-url="u.avatarUrl" size="sm" />
                   <span class="invite-option__text">
                     <strong>{{ u.name }}</strong>
-                    <span>{{ u.email }} · 已是成员</span>
+                    <span>{{ u.account }} · 已是成员</span>
                   </span>
                 </div>
                 <button
-                  v-if="canInviteNewEmail"
+                  v-if="canInviteNewAccount"
                   type="button"
                   class="invite-option invite-option--new"
                   @mousedown.prevent="
@@ -1300,11 +1736,11 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
                     void nextTick(() => addMember())
                   "
                 >
-                  <strong>邀请新邮箱</strong>
+                  <strong>邀请新账号</strong>
                   <span>{{ inviteQuery.trim() }}</span>
                 </button>
                 <p
-                  v-if="!inviteCandidates.length && !inviteAlreadyMembers.length && !canInviteNewEmail"
+                  v-if="!inviteCandidates.length && !inviteAlreadyMembers.length && !canInviteNewAccount"
                   class="invite-empty"
                 >
                   无匹配账号
@@ -1331,8 +1767,8 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
           <table class="table">
             <thead>
               <tr>
-                <th>姓名</th>
-                <th>邮箱</th>
+                <th>用户名</th>
+                <th>账号</th>
                 <th>角色</th>
                 <th>操作</th>
               </tr>
@@ -1341,11 +1777,11 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
               <tr v-for="m in members" :key="m.userId">
                 <td>
                   <div class="member-name">
-                    <UserAvatar :name="m.name" :email="m.email" :avatar-url="m.avatarUrl" size="sm" />
+                    <UserAvatar :name="m.name" :account="m.account" :avatar-url="m.avatarUrl" size="sm" />
                     <span>{{ m.name }}</span>
                   </div>
                 </td>
-                <td>{{ m.email }}</td>
+                <td>{{ m.account }}</td>
                 <td>
                   <NpSelect
                     v-if="canManage && !(m.role === 'owner' && myRole !== 'owner')"
@@ -1517,35 +1953,53 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
 <style scoped>
 .page {
   display: grid;
-  grid-template-columns: 176px minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 0;
   align-items: stretch;
-  min-height: calc(100vh - 120px);
-  margin: -4px 0 0;
+  /* 抵消壳层 content 内边距，左右贴边 */
+  margin: -16px -20px;
+  min-height: calc(100vh - 44px);
+  width: calc(100% + 40px);
+}
+
+.page--board {
+  height: calc(100vh - 44px);
+  max-height: calc(100vh - 44px);
+  overflow: hidden;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.page--board .main {
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.page--board .data-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.page--board .data-head {
+  flex-shrink: 0;
 }
 
 .side {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  align-self: start;
+  align-self: stretch;
   position: sticky;
   top: 0;
+  min-height: calc(100vh - 44px);
   padding: 14px 10px;
-  border: 1px solid var(--np-border);
-  border-radius: var(--np-radius-lg);
+  border: none;
+  border-right: 1px solid var(--np-border);
+  border-radius: 0;
   background:
     linear-gradient(180deg, color-mix(in srgb, #fff 88%, var(--np-bg)) 0%, var(--np-bg-elevated) 100%);
-  box-shadow: var(--np-shadow-sm);
-}
-
-.side-label {
-  margin: 0 8px 2px;
-  color: var(--np-text-muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  box-shadow: none;
 }
 
 .side-nav {
@@ -1606,9 +2060,10 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
 .main {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 8px;
   min-width: 0;
-  padding: 0;
+  min-height: 0;
+  padding: 8px 12px 12px;
 }
 
 .toolbar {
@@ -1637,30 +2092,78 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
 .data-panel {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   min-width: 0;
-  padding: 12px;
-  border: 1px solid var(--np-border);
-  border-radius: var(--np-radius-lg);
-  background:
-    linear-gradient(180deg, color-mix(in srgb, #fff 72%, var(--np-bg)) 0%, var(--np-bg-elevated) 100%);
-  box-shadow: var(--np-shadow-sm);
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .data-head {
   display: flex;
-  justify-content: flex-end;
+  flex-wrap: nowrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px 14px;
+  min-width: 0;
+}
+
+.panel-lead {
+  display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 10px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.panel-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: min(360px, 42vw);
+}
+
+.panel-identity__title {
+  margin: 0;
+  min-width: 0;
+  font-family: var(--np-font-display);
+  font-size: var(--np-text-md);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.panel-tools {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px 10px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.panel-tools .filter-groups {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  max-width: min(100%, 52vw);
+  padding-bottom: 1px;
 }
 
 .view-switch {
   display: inline-flex;
   gap: 2px;
-  padding: 3px;
-  border-radius: var(--np-radius-md);
-  background: color-mix(in srgb, var(--np-bg-sunken) 55%, #fff);
-  border: 1px solid var(--np-border);
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border: none;
 }
 
 .view-btn {
@@ -1670,7 +2173,7 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   height: 26px;
   padding: 0 8px;
   border: none;
-  border-radius: 3px;
+  border-radius: 4px;
   background: transparent;
   color: var(--np-text-muted);
   font-size: var(--np-text-xs);
@@ -1683,27 +2186,51 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
 
 .view-btn:hover {
   color: var(--np-text);
+  background: color-mix(in srgb, var(--np-accent-muted) 45%, transparent);
 }
 
 .view-btn.is-on {
-  background: var(--np-bg-elevated);
-  color: var(--np-accent);
-  box-shadow: var(--np-shadow-sm);
+  background: var(--np-accent-muted);
+  color: var(--np-accent-ink);
+  box-shadow: none;
 }
 
 @media (max-width: 860px) {
   .page {
     grid-template-columns: 1fr;
     margin: 0;
+    width: 100%;
+    min-height: auto;
   }
 
   .side {
     position: static;
+    min-height: auto;
     padding: 10px;
+    border: none;
+    border-bottom: 1px solid var(--np-border);
+    border-radius: 0;
   }
 
-  .side-label {
-    margin-bottom: 4px;
+  .main {
+    padding: 8px 0 0;
+  }
+
+  .board {
+    margin: 0;
+    padding: 0;
+  }
+
+  .page--board {
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .column {
+    min-height: 220px;
+    height: auto;
+    max-height: 52vh;
   }
 
   .side-nav {
@@ -1724,37 +2251,24 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   }
 }
 
-.filter-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px 18px;
-  padding: 10px 12px;
-  border: 1px solid var(--np-border);
-  border-radius: var(--np-radius-lg);
-  background: var(--np-bg-elevated);
-  box-shadow: var(--np-shadow-sm);
-}
-
 .filter-groups {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 14px 18px;
+  gap: 8px 12px;
   min-width: 0;
 }
 
 .filter-group {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .filter-group :deep(.np-select) {
   width: auto;
-  min-width: 9.5rem;
+  min-width: 7.5rem;
 }
 
 .filter-label {
@@ -1776,24 +2290,36 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   display: grid;
   grid-template-columns: repeat(var(--board-cols, 4), minmax(180px, 1fr));
   gap: 10px;
-  align-items: start;
+  align-items: stretch;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  margin: 0 -8px;
+  padding: 8px 4px 4px;
+  border-top: 1px solid var(--np-border);
+  overflow: hidden;
 }
 
 .column {
-  min-height: 260px;
-  padding: 10px;
-  border-radius: var(--np-radius-lg);
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--np-bg-sunken) 70%, #fff) 0%, color-mix(in srgb, var(--np-accent-muted) 40%, #fff) 100%);
-  border: 1px solid var(--np-border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  padding: 10px 8px 0;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--np-bg-sunken) 78%, #fff);
+  border: none;
+  overflow: hidden;
 }
 
 .column header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 10px;
-  padding: 2px 4px;
+  flex-shrink: 0;
+  margin-bottom: 8px;
+  padding: 0 2px 8px;
+  border-bottom: none;
   color: var(--np-text);
   font-family: var(--np-font-display);
   font-size: var(--np-text-sm);
@@ -1801,19 +2327,28 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   letter-spacing: -0.02em;
 }
 
+.column-cards {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0 0 10px;
+  overscroll-behavior: contain;
+}
+
 .column header span {
-  min-width: 20px;
-  height: 20px;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--np-bg-elevated);
-  color: var(--np-accent-ink);
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--np-bg-sunken) 70%, #fff);
+  color: var(--np-text-muted);
   font-family: var(--np-font-mono);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  line-height: 20px;
+  line-height: 18px;
   text-align: center;
-  border: 1px solid var(--np-border);
+  border: none;
 }
 
 .card {
@@ -1821,23 +2356,30 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   flex-direction: column;
   gap: 6px;
   min-width: 0;
-  padding: 10px 11px;
-  margin-bottom: 8px;
-  border-radius: var(--np-radius-md);
-  background: #fff;
-  border: 1px solid var(--np-border);
-  box-shadow: var(--np-shadow-sm);
+  padding: 8px 9px;
+  margin-bottom: 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, #fff 88%, var(--np-bg));
+  border: 1px solid color-mix(in srgb, var(--np-border) 80%, transparent);
+  box-shadow: none;
   cursor: grab;
   transition:
     border-color var(--np-duration-fast) var(--np-ease),
-    box-shadow var(--np-duration-fast) var(--np-ease),
-    transform var(--np-duration-fast) var(--np-ease);
+    background var(--np-duration-fast) var(--np-ease);
 }
 
 .card:hover {
+  border-color: color-mix(in srgb, var(--np-accent) 45%, var(--np-border));
+  background: #fff;
+}
+
+.card.is-dragging {
+  opacity: 0.45;
+}
+
+.card.is-drop-target {
+  box-shadow: inset 0 2px 0 0 var(--np-accent);
   border-color: color-mix(in srgb, var(--np-accent) 55%, var(--np-border));
-  box-shadow: var(--np-shadow-md);
-  transform: translateY(-1px);
 }
 
 .card:active {
@@ -1851,12 +2393,24 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   min-width: 0;
 }
 
-.card-row--title {
-  justify-content: space-between;
+.card-row--main {
+  flex-wrap: nowrap;
 }
 
-.card-row--meta {
-  flex-wrap: wrap;
+.card-row--foot {
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.card-row--foot .card-progress {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+}
+
+.card-row--foot .card-updated {
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 .card :deep(.np-badge) {
@@ -1886,8 +2440,8 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   font-family: var(--np-font-mono);
 }
 
-.child-pill,
-.att-pill {
+.att-pill,
+.due-pill {
   flex-shrink: 0;
   padding: 0 5px;
   height: 16px;
@@ -1898,11 +2452,76 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   font-weight: 700;
   line-height: 16px;
   font-variant-numeric: tabular-nums;
+  font-family: var(--np-font-mono);
+}
+
+.card-updated {
+  color: var(--np-text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--np-font-mono);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.card-progress__bar {
+  flex: 1;
+  min-width: 0;
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--np-bg-sunken) 70%, #fff);
+  overflow: hidden;
+  border: 1px solid var(--np-border);
+}
+
+.card-progress__fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--np-accent), color-mix(in srgb, var(--np-accent) 70%, #3d9a6a));
+  transition: width var(--np-duration-fast) var(--np-ease);
+}
+
+.card-progress__label {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--np-font-mono);
+  color: var(--np-text-muted);
+  line-height: 1;
 }
 
 .att-pill {
   background: color-mix(in srgb, var(--np-accent-muted) 80%, #fff);
   color: var(--np-accent-ink);
+}
+
+.due-pill {
+  background: color-mix(in srgb, var(--np-bg-sunken) 65%, #fff);
+  color: var(--np-text-muted);
+  border: 1px solid var(--np-border);
+}
+
+.due-pill.is-due-soon {
+  background: color-mix(in srgb, var(--np-warning-muted) 80%, #fff);
+  color: color-mix(in srgb, var(--np-warning) 80%, #000);
+  border-color: color-mix(in srgb, var(--np-warning) 40%, var(--np-border));
+}
+
+.due-pill.is-overdue {
+  background: color-mix(in srgb, var(--np-danger-muted) 80%, #fff);
+  color: var(--np-danger);
+  border-color: color-mix(in srgb, var(--np-danger) 40%, var(--np-border));
 }
 
 .tree-wrap {
@@ -1911,16 +2530,17 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
   gap: 0;
   min-width: 0;
   overflow-x: auto;
-  border: 1px solid var(--np-border);
-  border-radius: var(--np-radius-md);
-  background: #fff;
-  padding: 10px 8px 4px;
+  border: none;
+  border-top: 1px solid var(--np-border);
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 0 4px;
 }
 
 .tree-head,
 .tree-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1.6fr) minmax(120px, 0.7fr) 7.5rem minmax(88px, 0.55fr);
+  grid-template-columns: minmax(200px, 1.5fr) minmax(100px, 0.65fr) 5.5rem 7.5rem minmax(80px, 0.5fr);
   gap: 8px;
   align-items: center;
   min-width: 560px;
@@ -1985,6 +2605,10 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
 
 .tree-col--progress {
   gap: 8px;
+}
+
+.tree-col--due {
+  justify-content: flex-start;
 }
 
 .tree-col--status :deep(.np-select) {
@@ -2290,15 +2914,173 @@ onBeforeUnmount(() => document.removeEventListener("pointerdown", onInviteDocPoi
 
 .table-wrap {
   overflow: auto;
-  border: 1px solid var(--np-border);
-  border-radius: var(--np-radius-md);
+  border: none;
+  border-top: 1px solid var(--np-border);
+  border-radius: 0;
   box-shadow: none;
-  background: #fff;
+  background: transparent;
 }
 
 .data-panel > .table-wrap,
-.data-panel > .tree-wrap {
-  margin-top: 2px;
+.data-panel > .tree-wrap,
+.data-panel > .schedule-wrap {
+  margin-top: 0;
+}
+
+.schedule-wrap {
+  border: none;
+  border-top: 1px solid var(--np-border);
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.schedule-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.schedule-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.schedule-range {
+  font-family: var(--np-font-mono);
+  font-size: var(--np-text-xs);
+}
+
+.schedule-scroll {
+  overflow: auto;
+  max-height: min(70vh, 720px);
+}
+
+.schedule-grid {
+  display: grid;
+  grid-template-columns: minmax(200px, 240px) repeat(var(--sched-days, 14), minmax(28px, 1fr));
+  min-width: max(100%, calc(200px + var(--sched-days, 14) * 28px));
+  align-items: stretch;
+}
+
+.schedule-corner,
+.schedule-dayhead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: color-mix(in srgb, var(--np-bg-sunken) 55%, #fff);
+  border-bottom: 1px solid var(--np-border);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--np-text-muted);
+  padding: 6px 4px;
+}
+
+.schedule-corner {
+  left: 0;
+  z-index: 3;
+}
+
+.schedule-dayhead {
+  text-align: center;
+  font-family: var(--np-font-mono);
+}
+
+.schedule-dayhead.is-today,
+.schedule-cell.is-today {
+  background: color-mix(in srgb, var(--np-accent-muted) 55%, transparent);
+}
+
+.schedule-label {
+  grid-column: 1;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 36px;
+  padding: 0 8px;
+  border: none;
+  border-bottom: 1px solid var(--np-border);
+  border-right: 1px solid var(--np-border);
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.schedule-label:hover {
+  background: color-mix(in srgb, var(--np-accent-muted) 40%, #fff);
+}
+
+.schedule-label.is-child {
+  background: color-mix(in srgb, var(--np-bg-sunken) 40%, #fff);
+  font-weight: 500;
+}
+
+.schedule-label__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--np-text-xs);
+}
+
+.schedule-track {
+  grid-column: 2 / -1;
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(var(--sched-days, 14), minmax(0, 1fr));
+  height: 36px;
+  border-bottom: 1px solid var(--np-border);
+  cursor: pointer;
+  min-width: 0;
+}
+
+.schedule-cell {
+  border-right: 1px solid color-mix(in srgb, var(--np-border) 70%, transparent);
+}
+
+.schedule-bar {
+  position: absolute;
+  top: 10px;
+  height: 16px;
+  border-radius: 4px;
+  background: var(--np-accent);
+  box-shadow: var(--np-shadow-sm);
+  pointer-events: none;
+  min-width: 8px;
+}
+
+.schedule-bar.is-status-todo {
+  background: color-mix(in srgb, var(--np-text-muted) 55%, #fff);
+}
+
+.schedule-bar.is-status-doing {
+  background: var(--np-accent);
+}
+
+.schedule-bar.is-status-review {
+  background: var(--np-warning);
+}
+
+.schedule-bar.is-status-done {
+  background: var(--np-success);
+  opacity: 0.75;
+}
+
+.schedule-bar.is-overdue:not(.is-done) {
+  background: var(--np-danger);
 }
 
 .nowrap {

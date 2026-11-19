@@ -53,9 +53,12 @@ type Issue struct {
 	ModuleName      string    `json:"moduleName,omitempty"`
 	ParentID        string    `json:"parentId,omitempty"`
 	ParentKey       string    `json:"parentKey,omitempty"`
+	StartDate       string    `json:"startDate,omitempty"` // YYYY-MM-DD 可选
+	DueDate         string    `json:"dueDate,omitempty"`   // YYYY-MM-DD 截止日期
 	ChildCount      int       `json:"childCount"`
 	ChildDone       int       `json:"childDoneCount"`
 	AttachmentCount int       `json:"attachmentCount"`
+	BoardOrder      float64   `json:"boardOrder"` // 看板排序，越大越靠上；默认取更新时间戳
 	CreatorID       string    `json:"creatorId"`
 	CreatedAt       time.Time `json:"createdAt"`
 	UpdatedAt       time.Time `json:"updatedAt"`

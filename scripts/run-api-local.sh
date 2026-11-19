@@ -12,9 +12,8 @@ export GOROOT="${GOROOT_OVERRIDE:-/opt/homebrew/opt/go/libexec}"
 export PATH="$GOROOT/bin:$PATH"
 
 mkdir -p "$(dirname "$LOG")" "$ROOT/apps/api/bin"
-if [[ ! -x "$BIN" ]]; then
-  (cd "$ROOT/apps/api" && go build -o "$BIN" ./cmd/server)
-fi
+# always rebuild so local restarts pick up Go changes
+(cd "$ROOT/apps/api" && go build -o "$BIN" ./cmd/server)
 
 # stop previous
 if [[ -f "$PIDFILE" ]]; then

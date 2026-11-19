@@ -73,6 +73,7 @@ func (s *Server) NewRouter() *gin.Engine {
 			authz.GET("/issues/:id", s.handleGetIssue)
 			authz.PATCH("/issues/:id", s.handleUpdateIssue)
 			authz.PATCH("/issues/:id/status", s.handleUpdateIssueStatus)
+			authz.PATCH("/issues/:id/board", s.handleReorderIssueBoard)
 			authz.GET("/issues/:id/comments", s.handleListComments)
 			authz.POST("/issues/:id/comments", s.handleCreateComment)
 			authz.GET("/issues/:id/attachments", s.handleListIssueAttachments)
@@ -87,6 +88,15 @@ func (s *Server) NewRouter() *gin.Engine {
 			authz.GET("/notifications/unread-count", s.handleUnreadNotificationCount)
 			authz.POST("/notifications/read-all", s.handleMarkAllNotificationsRead)
 			authz.POST("/notifications/:id/read", s.handleMarkNotificationRead)
+
+			admin := authz.Group("/admin")
+			admin.Use(s.requireAdmin())
+			{
+				admin.GET("/users", s.handleAdminListUsers)
+				admin.POST("/users", s.handleAdminCreateUser)
+				admin.PATCH("/users/:id", s.handleAdminUpdateUser)
+				admin.DELETE("/users/:id", s.handleAdminDeleteUser)
+			}
 		}
 	}
 

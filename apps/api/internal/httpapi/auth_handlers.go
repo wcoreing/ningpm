@@ -13,7 +13,8 @@ import (
 )
 
 type loginReq struct {
-	Email    string `json:"email" binding:"required"`
+	Account  string `json:"account"`
+	Email    string `json:"email"` // legacy alias for account
 	Password string `json:"password" binding:"required"`
 }
 
@@ -27,10 +28,19 @@ type changePasswordReq struct {
 }
 
 func userPublic(u *user.User) gin.H {
+	account := u.Account
+	if account == "" {
+		account = u.Email
+	}
 	out := gin.H{
-		"id":    u.ID,
-		"name":  u.Name,
-		"email": u.Email,
+		"id":      u.ID,
+		"name":    u.Name,
+		"account": account,
+		"isAdmin": u.IsAdmin,
+	}
+	// email 仅作可选联系字段；与 account 相同时不对外重复暴露
+	if u.Email != "" && u.Email != account {
+		out["email"] = u.Email
 	}
 	if url := u.AvatarURL(); url != "" {
 		out["avatarUrl"] = url
@@ -38,13 +48,27 @@ func userPublic(u *user.User) gin.H {
 	return out
 }
 
+func userAdminPublic(u *user.User) gin.H {
+	out := userPublic(u)
+	out["createdAt"] = u.CreatedAt.UTC().Format("2006-01-02T15:04:05Z")
+	return out
+}
+
 func (s *Server) handleLogin(c *gin.Context) {
 	var req loginReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "请填写邮箱和密码")
+		Fail(c, http.StatusBadRequest, "请填写账号和密码")
 		return
 	}
-	u, err := s.store.GetUserByEmail(req.Email)
+	account := strings.TrimSpace(req.Account)
+	if account == "" {
+		account = strings.TrimSpace(req.Email)
+	}
+	if account == "" {
+		Fail(c, http.StatusBadRequest, "请填写账号和密码")
+		return
+	}
+	u, err := s.store.GetUserByAccount(account)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			Fail(c, http.StatusUnauthorized, "账号或密码错误")
@@ -57,7 +81,11 @@ func (s *Server) handleLogin(c *gin.Context) {
 		Fail(c, http.StatusUnauthorized, "账号或密码错误")
 		return
 	}
-	token, err := s.jwt.Issue(u.ID, u.Name, u.Email)
+	loginID := u.Account
+	if loginID == "" {
+		loginID = u.Email
+	}
+	token, err := s.jwt.Issue(u.ID, u.Name, loginID)
 	if err != nil {
 		Fail(c, http.StatusInternalServerError, "签发令牌失败")
 		return
@@ -222,7 +250,14 @@ func (s *Server) handleListUsers(c *gin.Context) {
 	}
 	out := make([]gin.H, 0, len(users))
 	for _, u := range users {
-		item := gin.H{"id": u.ID, "name": u.Name, "email": u.Email}
+		account := u.Account
+		if account == "" {
+			account = u.Email
+		}
+		item := gin.H{"id": u.ID, "name": u.Name, "account": account}
+		if u.Email != "" {
+			item["email"] = u.Email
+		}
 		if url := u.AvatarURL(); url != "" {
 			item["avatarUrl"] = url
 		}

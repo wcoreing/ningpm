@@ -123,6 +123,14 @@ onMounted(() => {
         >
           {{ item.label }}
         </button>
+        <button
+          v-if="auth.isAdmin"
+          type="button"
+          class="side-item"
+          @click="router.push({ name: 'users' })"
+        >
+          账号管理
+        </button>
       </nav>
     </aside>
 
@@ -134,7 +142,7 @@ onMounted(() => {
         <div class="avatar-row">
           <UserAvatar
             :name="auth.user?.name"
-            :email="auth.user?.email"
+            :account="auth.user?.account"
             :avatar-url="auth.user?.avatarUrl"
             size="lg"
           />
@@ -163,11 +171,11 @@ onMounted(() => {
           </div>
         </div>
         <div class="form">
-          <NpField label="显示名">
+          <NpField label="用户名">
             <NpInput v-model="name" placeholder="你的名字" />
           </NpField>
-          <NpField label="邮箱">
-            <NpInput :model-value="auth.user?.email || ''" disabled />
+          <NpField label="账号">
+            <NpInput :model-value="auth.user?.account || ''" disabled />
           </NpField>
           <div class="actions">
             <NpButton variant="primary" :disabled="profileSaving" @click="saveProfile">

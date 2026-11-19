@@ -9,7 +9,7 @@ import (
 
 const ctxUserID = "userID"
 const ctxUserName = "userName"
-const ctxUserEmail = "userEmail"
+const ctxUserAccount = "userAccount"
 
 func (s *Server) requireAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -27,7 +27,7 @@ func (s *Server) requireAuth() gin.HandlerFunc {
 		}
 		c.Set(ctxUserID, claims.UserID)
 		c.Set(ctxUserName, claims.Name)
-		c.Set(ctxUserEmail, claims.Email)
+		c.Set(ctxUserAccount, claims.Account)
 		c.Next()
 	}
 }

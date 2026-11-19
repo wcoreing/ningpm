@@ -4,6 +4,7 @@ import { storeToRefs } from "pinia"
 import { useRoute, useRouter } from "vue-router"
 import { NpBadge, NpButton, NpPagination, NpSelect } from "@ningpm/ui"
 import { PRIORITY_LABELS, STATUS_LABELS, TYPE_LABELS, priorityTone, typeTone } from "../lib/labels"
+import { formatDueLabel, isOverdue } from "../lib/schedule"
 import type { Issue, UserOption } from "../types"
 import { useAuthStore } from "../stores/auth"
 import { useProjectsStore } from "../stores/projects"
@@ -32,12 +33,13 @@ const activeIssueId = ref<string | null>(null)
 const projectFilter = ref("all")
 const typeFilter = ref("all")
 const statusFilter = ref("open")
+const dueFilter = ref("all") // all | overdue | week | none
 const scopeFilter = ref<"all" | "mine">("all")
 const page = ref(1)
 const pageSize = ref(20)
 
 const memberUsers = computed<UserOption[]>(() =>
-  contextMembers.value.map((m) => ({ id: m.userId, name: m.name, email: m.email })),
+  contextMembers.value.map((m) => ({ id: m.userId, name: m.name, account: m.account, email: m.email })),
 )
 
 const visible = computed(() => {
@@ -61,6 +63,7 @@ async function load() {
         projectId: projectFilter.value,
         type: typeFilter.value,
         status: statusFilter.value,
+        due: dueFilter.value,
         mine: scopeFilter.value === "mine",
       })
       .catch(() => {}),
@@ -81,7 +84,7 @@ function goProject(it: Issue) {
   void router.push({ name: "project-detail", params: { id: it.projectId } })
 }
 
-watch([projectFilter, typeFilter, statusFilter, scopeFilter], () => {
+watch([projectFilter, typeFilter, statusFilter, dueFilter, scopeFilter], () => {
   page.value = 1
   void load()
 })
@@ -145,6 +148,15 @@ onMounted(() => {
             <option value="done">已完成</option>
           </NpSelect>
         </div>
+        <div class="filter-group">
+          <span class="filter-label">到期</span>
+          <NpSelect v-model="dueFilter" size="sm">
+            <option value="all">全部到期</option>
+            <option value="overdue">已逾期</option>
+            <option value="week">本周到期</option>
+            <option value="none">未排期</option>
+          </NpSelect>
+        </div>
       </div>
       <NpButton size="sm" variant="ghost" :disabled="loading" @click="load">刷新</NpButton>
     </div>
@@ -164,6 +176,7 @@ onMounted(() => {
                 <th>标题</th>
                 <th>子项</th>
                 <th>附件</th>
+                <th>截止</th>
                 <th>优先级</th>
                 <th>状态</th>
                 <th>指派给</th>
@@ -188,6 +201,14 @@ onMounted(() => {
                 </td>
                 <td class="nowrap">
                   <span v-if="it.attachmentCount">{{ it.attachmentCount }}</span>
+                  <span v-else class="muted">—</span>
+                </td>
+                <td class="nowrap">
+                  <span
+                    v-if="it.dueDate"
+                    class="due-pill"
+                    :class="{ 'is-overdue': isOverdue(it.dueDate, it.status) }"
+                  >{{ formatDueLabel(it.dueDate) }}</span>
                   <span v-else class="muted">—</span>
                 </td>
                 <td><NpBadge :tone="priorityTone(it.priority)">{{ PRIORITY_LABELS[it.priority] }}</NpBadge></td>
@@ -392,6 +413,27 @@ onMounted(() => {
 .nowrap {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+.due-pill {
+  display: inline-block;
+  padding: 0 5px;
+  height: 18px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--np-bg-sunken) 65%, #fff);
+  color: var(--np-text-muted);
+  border: 1px solid var(--np-border);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  font-family: var(--np-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.due-pill.is-overdue {
+  background: color-mix(in srgb, var(--np-danger-muted) 80%, #fff);
+  color: var(--np-danger);
+  border-color: color-mix(in srgb, var(--np-danger) 40%, var(--np-border));
 }
 
 .muted {

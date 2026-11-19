@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/ningpm/ningpm/apps/api/internal/domain/issue"
@@ -20,6 +21,8 @@ type createIssueReq struct {
 	CycleID     string         `json:"cycleId"`
 	ModuleID    string         `json:"moduleId"`
 	ParentID    string         `json:"parentId"`
+	StartDate   string         `json:"startDate"`
+	DueDate     string         `json:"dueDate"`
 	Status      issue.Status   `json:"status"`
 }
 
@@ -31,11 +34,19 @@ type updateIssueReq struct {
 	AssigneeID  *string         `json:"assigneeId"`
 	CycleID     *string         `json:"cycleId"`
 	ModuleID    *string         `json:"moduleId"`
+	StartDate   *string         `json:"startDate"`
+	DueDate     *string         `json:"dueDate"`
 	Status      *issue.Status   `json:"status"`
 }
 
 type updateStatusReq struct {
 	Status issue.Status `json:"status" binding:"required"`
+}
+
+type reorderBoardReq struct {
+	Status   issue.Status `json:"status" binding:"required"`
+	BeforeID string       `json:"beforeId"` // 上方卡片
+	AfterID  string       `json:"afterId"`  // 下方卡片；都空则置顶
 }
 
 func (s *Server) handleListIssues(c *gin.Context) {
@@ -50,6 +61,7 @@ func (s *Server) handleListIssues(c *gin.Context) {
 		CycleID:    c.Query("cycleId"),
 		ModuleID:   c.Query("moduleId"),
 		ParentID:   c.Query("parentId"),
+		Due:        c.Query("due"),
 		RootsOnly:  rootsQ == "1" || rootsQ == "true",
 		Backlog:    c.Query("backlog") == "1" || c.Query("backlog") == "true",
 		UserID:     currentUserID(c),
@@ -154,6 +166,11 @@ func (s *Server) handleCreateIssue(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "状态无效")
 		return
 	}
+	startDate, dueDate, ok := normalizeSchedule(req.StartDate, req.DueDate)
+	if !ok {
+		Fail(c, http.StatusBadRequest, "开始日不能晚于截止日期")
+		return
+	}
 	it := &issue.Issue{
 		ProjectID:   req.ProjectID,
 		Type:        req.Type,
@@ -165,6 +182,8 @@ func (s *Server) handleCreateIssue(c *gin.Context) {
 		CycleID:     cycleID,
 		ModuleID:    moduleID,
 		ParentID:    parentID,
+		StartDate:   startDate,
+		DueDate:     dueDate,
 		CreatorID:   currentUserID(c),
 	}
 	if err := s.store.CreateIssue(it); err != nil {
@@ -270,6 +289,23 @@ func (s *Server) handleUpdateIssue(c *gin.Context) {
 		}
 		it.Status = *req.Status
 	}
+	if req.StartDate != nil || req.DueDate != nil {
+		start := it.StartDate
+		due := it.DueDate
+		if req.StartDate != nil {
+			start = *req.StartDate
+		}
+		if req.DueDate != nil {
+			due = *req.DueDate
+		}
+		startDate, dueDate, ok := normalizeSchedule(start, due)
+		if !ok {
+			Fail(c, http.StatusBadRequest, "开始日不能晚于截止日期")
+			return
+		}
+		it.StartDate = startDate
+		it.DueDate = dueDate
+	}
 	if err := s.store.UpdateIssue(it); err != nil {
 		Fail(c, http.StatusInternalServerError, "更新事项失败")
 		return
@@ -306,6 +342,36 @@ func (s *Server) handleUpdateIssueStatus(c *gin.Context) {
 	OK(c, it)
 }
 
+func (s *Server) handleReorderIssueBoard(c *gin.Context) {
+	var req reorderBoardReq
+	if err := c.ShouldBindJSON(&req); err != nil || !validStatus(req.Status) {
+		Fail(c, http.StatusBadRequest, "状态无效")
+		return
+	}
+	current, err := s.store.GetIssue(c.Param("id"))
+	if err != nil {
+		if err == sql.ErrNoRows {
+			Fail(c, http.StatusNotFound, "事项不存在")
+			return
+		}
+		Fail(c, http.StatusInternalServerError, "加载事项失败")
+		return
+	}
+	if !s.requireWrite(c, current.ProjectID) {
+		return
+	}
+	it, err := s.store.ReorderIssueBoard(c.Param("id"), req.Status, strings.TrimSpace(req.BeforeID), strings.TrimSpace(req.AfterID))
+	if err != nil {
+		if err == sql.ErrNoRows {
+			Fail(c, http.StatusBadRequest, "锚点事项不存在")
+			return
+		}
+		Fail(c, http.StatusInternalServerError, "排序失败")
+		return
+	}
+	OK(c, it)
+}
+
 func validType(t issue.Type) bool {
 	switch t {
 	case issue.TypeStory, issue.TypeTask, issue.TypeBug, issue.TypeEpic:
@@ -322,4 +388,28 @@ func validStatus(st issue.Status) bool {
 	default:
 		return false
 	}
+}
+
+// normalizeSchedule trims dates to YYYY-MM-DD (or empty). ok=false when start > due.
+func normalizeSchedule(startRaw, dueRaw string) (start, due string, ok bool) {
+	start = normalizeDate(startRaw)
+	due = normalizeDate(dueRaw)
+	if start != "" && due != "" && start > due {
+		return "", "", false
+	}
+	return start, due, true
+}
+
+func normalizeDate(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if len(s) >= 10 {
+		s = s[:10]
+	}
+	if _, err := time.Parse("2006-01-02", s); err != nil {
+		return ""
+	}
+	return s
 }

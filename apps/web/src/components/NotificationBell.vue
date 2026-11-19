@@ -83,10 +83,16 @@ onUnmounted(() => {
       variant="ghost"
       class="bell"
       :aria-expanded="open"
-      aria-label="通知"
+      :aria-label="unread > 0 ? `通知 ${unreadLabel}` : '通知'"
       @click.stop="toggle"
     >
-      通知{{ unread > 0 ? ` · ${unreadLabel}` : "" }}
+      <svg class="bell-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+        <path
+          fill="currentColor"
+          d="M8 1.4a3.4 3.4 0 0 0-3.4 3.4v1.3c0 .7-.2 1.4-.6 2L3.2 9.4A1 1 0 0 0 4 11h8a1 1 0 0 0 .8-1.6l-.8-1.3c-.4-.6-.6-1.3-.6-2V4.8A3.4 3.4 0 0 0 8 1.4zm0 12.2a1.6 1.6 0 0 0 1.5-1H6.5a1.6 1.6 0 0 0 1.5 1z"
+        />
+      </svg>
+      <span v-if="unread > 0" class="bell-badge">{{ unreadLabel }}</span>
     </NpButton>
 
     <div v-if="open" class="panel" role="dialog" aria-label="通知列表" @click.stop>
@@ -124,6 +130,38 @@ onUnmounted(() => {
 
 .bell {
   position: relative;
+  min-width: 32px;
+  padding-inline: 8px;
+}
+
+.bell :deep(.np-button__label),
+.bell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bell-icon {
+  display: block;
+}
+
+.bell-badge {
+  position: absolute;
+  top: 0;
+  right: 0;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--np-danger);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  transform: translate(20%, -10%);
+  pointer-events: none;
 }
 
 .panel {

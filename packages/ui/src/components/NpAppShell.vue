@@ -9,7 +9,7 @@ defineProps<{
   <div class="np-shell">
     <aside class="np-shell__aside">
       <div class="np-shell__brand">
-        <div class="np-shell__mark" aria-hidden="true" />
+        <img class="np-shell__mark" src="/logo.png" alt="" width="30" height="30" />
         <div class="np-shell__brand-text">
           <strong>{{ brand || "ningpm" }}</strong>
           <span v-if="version" class="np-shell__version">v{{ version }}</span>
@@ -69,9 +69,9 @@ defineProps<{
   width: 30px;
   height: 30px;
   border-radius: 9px;
-  background:
-    linear-gradient(145deg, var(--np-accent-hover), var(--np-accent-active) 72%),
-    var(--np-accent);
+  display: block;
+  flex-shrink: 0;
+  object-fit: cover;
   box-shadow:
     inset 0 0 0 1px rgb(255 255 255 / 22%),
     0 6px 16px rgb(64 158 255 / 28%);
@@ -131,10 +131,10 @@ defineProps<{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
   flex-shrink: 0;
-  min-height: 68px;
-  padding: 14px 28px;
+  min-height: 44px;
+  padding: 6px 20px;
   border-bottom: 1px solid color-mix(in srgb, var(--np-border) 80%, transparent);
   background: color-mix(in srgb, var(--np-bg-elevated) 82%, transparent);
   backdrop-filter: blur(10px);
@@ -146,7 +146,7 @@ defineProps<{
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 28px;
+  padding: 16px 20px;
   background: transparent;
 }
 
@@ -179,7 +179,7 @@ defineProps<{
 
   .np-shell__content {
     overflow: visible;
-    padding: 20px 16px;
+    padding: 12px 14px;
   }
 }
 </style>

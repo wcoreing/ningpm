@@ -124,6 +124,8 @@ const form = ref({
   assigneeId: "",
   cycleId: "",
   moduleId: "",
+  startDate: "",
+  dueDate: "",
 })
 
 const open = computed(() => props.open && Boolean(props.issueId))
@@ -157,6 +159,8 @@ async function load() {
       assigneeId: it.assigneeId || "",
       cycleId: it.cycleId || "",
       moduleId: it.moduleId || "",
+      startDate: it.startDate || "",
+      dueDate: it.dueDate || "",
     }
     if (!it.parentId) {
       children.value = await api<Issue[]>(`/api/issues?parentId=${encodeURIComponent(it.id)}`)
@@ -191,12 +195,7 @@ async function createChild() {
     })
     children.value = [...children.value, created]
     childTitle.value = ""
-    issue.value = {
-      ...issue.value,
-      childCount: (issue.value.childCount || 0) + 1,
-      childDoneCount: issue.value.childDoneCount || 0,
-    }
-    emit("updated", issue.value)
+    await refreshSelf()
     toast.success("已添加子事项")
   } catch (e) {
     const msg = e instanceof Error ? e.message : "创建子事项失败"
@@ -207,20 +206,31 @@ async function createChild() {
   }
 }
 
-async function toggleChildDone(child: Issue) {
+async function refreshSelf() {
+  if (!issue.value) return
+  const latest = await api<Issue>(`/api/issues/${issue.value.id}`)
+  issue.value = latest
+  form.value.status = latest.status
+  emit("updated", latest)
+}
+
+async function patchChild(child: Issue, patch: { status?: string; assigneeId?: string }) {
   if (props.canWrite === false) return
-  const next = child.status === "done" ? "todo" : "done"
   try {
-    const updated = await api<Issue>(`/api/issues/${child.id}/status`, {
-      method: "PATCH",
-      body: JSON.stringify({ status: next }),
-    })
-    children.value = children.value.map((c) => (c.id === child.id ? updated : c))
-    if (issue.value) {
-      const done = children.value.filter((c) => c.status === "done").length
-      issue.value = { ...issue.value, childCount: children.value.length, childDoneCount: done }
-      emit("updated", issue.value)
+    let updated: Issue
+    if (patch.status !== undefined && patch.assigneeId === undefined) {
+      updated = await api<Issue>(`/api/issues/${child.id}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: patch.status }),
+      })
+    } else {
+      updated = await api<Issue>(`/api/issues/${child.id}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      })
     }
+    children.value = children.value.map((c) => (c.id === child.id ? { ...c, ...updated } : c))
+    await refreshSelf()
   } catch (e) {
     toast.error(e instanceof Error ? e.message : "更新子事项失败")
   }
@@ -242,6 +252,8 @@ async function save() {
         assigneeId: form.value.assigneeId,
         cycleId: form.value.cycleId,
         moduleId: form.value.moduleId,
+        startDate: form.value.startDate,
+        dueDate: form.value.dueDate,
       }),
     })
     issue.value = updated
@@ -454,6 +466,14 @@ watch(
             @update:modules="emit('update:modules', $event)"
           />
         </NpField>
+        <div class="row">
+          <NpField label="开始日">
+            <NpInput v-model="form.startDate" type="date" />
+          </NpField>
+          <NpField label="截止日期">
+            <NpInput v-model="form.dueDate" type="date" />
+          </NpField>
+        </div>
         <NpField label="描述">
           <NpTextarea v-model="form.description" :rows="5" />
         </NpField>
@@ -463,19 +483,33 @@ watch(
         <h4>子事项 · {{ childProgress.done }}/{{ childProgress.total || 0 }}</h4>
         <ul v-if="children.length" class="child-list">
           <li v-for="ch in children" :key="ch.id" class="child-row">
-            <label class="check">
-              <input
-                type="checkbox"
-                :checked="ch.status === 'done'"
-                :disabled="canWrite === false"
-                @change="toggleChildDone(ch)"
-              />
-            </label>
             <button type="button" class="child-main" @click="emit('open-issue', ch.id)">
               <span class="key">{{ ch.key }}</span>
               <span class="child-title" :class="{ done: ch.status === 'done' }">{{ ch.title }}</span>
               <NpBadge :tone="typeTone(ch.type)">{{ TYPE_LABELS[ch.type] }}</NpBadge>
             </button>
+            <div class="child-controls" @click.stop>
+              <div class="child-status" :class="`status-select--${ch.status}`">
+                <NpSelect
+                  size="sm"
+                  :model-value="ch.status"
+                  :disabled="canWrite === false"
+                  @update:model-value="patchChild(ch, { status: $event })"
+                >
+                  <option v-for="s in STATUS_ORDER" :key="s" :value="s">{{ STATUS_LABELS[s] }}</option>
+                </NpSelect>
+              </div>
+              <NpSelect
+                class="child-assignee"
+                size="sm"
+                :model-value="ch.assigneeId || ''"
+                :disabled="canWrite === false"
+                @update:model-value="patchChild(ch, { assigneeId: $event })"
+              >
+                <option value="">未指派</option>
+                <option v-for="u in users" :key="u.id" :value="u.id">{{ u.name }}</option>
+              </NpSelect>
+            </div>
           </li>
         </ul>
         <p v-else class="muted">还没有子事项</p>
@@ -645,11 +679,6 @@ watch(
   border-bottom: 1px solid var(--np-border);
 }
 
-.check {
-  display: inline-flex;
-  flex-shrink: 0;
-}
-
 .child-main {
   display: flex;
   flex: 1;
@@ -662,6 +691,37 @@ watch(
   text-align: left;
   cursor: pointer;
   color: inherit;
+}
+
+.child-controls {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.child-status {
+  width: 88px;
+}
+
+.child-assignee {
+  width: 96px;
+}
+
+.child-status.status-select--todo :deep(.np-select) {
+  color: var(--np-text-muted);
+}
+
+.child-status.status-select--doing :deep(.np-select) {
+  color: var(--np-accent-ink);
+}
+
+.child-status.status-select--review :deep(.np-select) {
+  color: var(--np-warning);
+}
+
+.child-status.status-select--done :deep(.np-select) {
+  color: var(--np-success);
 }
 
 .child-title {

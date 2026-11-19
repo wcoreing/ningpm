@@ -6,7 +6,9 @@ import { compressImage } from "../lib/image"
 export type AuthUser = {
   id: string
   name: string
-  email: string
+  account: string
+  email?: string
+  isAdmin?: boolean
   avatarUrl?: string
 }
 
@@ -16,11 +18,12 @@ export const useAuthStore = defineStore("auth", () => {
   const booted = ref(false)
 
   const isAuthed = computed(() => Boolean(token.value))
+  const isAdmin = computed(() => Boolean(user.value?.isAdmin))
 
-  async function login(email: string, password: string) {
+  async function login(account: string, password: string) {
     const data = await api<{ token: string; user: AuthUser }>("/api/auth/login", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ account, password }),
     })
     setToken(data.token)
     token.value = data.token
@@ -105,6 +108,7 @@ export const useAuthStore = defineStore("auth", () => {
     user,
     booted,
     isAuthed,
+    isAdmin,
     login,
     fetchMe,
     updateProfile,

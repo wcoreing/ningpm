@@ -10,10 +10,11 @@ import (
 )
 
 type addMemberReq struct {
-	UserID string      `json:"userId"`
-	Email  string      `json:"email"`
-	Name   string      `json:"name"`
-	Role   member.Role `json:"role"`
+	UserID  string      `json:"userId"`
+	Account string      `json:"account"`
+	Email   string      `json:"email"` // legacy alias for account
+	Name    string      `json:"name"`
+	Role    member.Role `json:"role"`
 }
 
 type addMemberResp struct {
@@ -52,7 +53,7 @@ func (s *Server) handleAddMember(c *gin.Context) {
 
 	var req addMemberReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "请填写邮箱")
+		Fail(c, http.StatusBadRequest, "请填写账号")
 		return
 	}
 	role := req.Role
@@ -65,16 +66,19 @@ func (s *Server) handleAddMember(c *gin.Context) {
 	}
 
 	userID := strings.TrimSpace(req.UserID)
-	email := strings.ToLower(strings.TrimSpace(req.Email))
+	account := strings.TrimSpace(req.Account)
+	if account == "" {
+		account = strings.TrimSpace(req.Email)
+	}
 	createdUser := false
 	tempPassword := ""
 
 	if userID == "" {
-		if email == "" || !strings.Contains(email, "@") {
-			Fail(c, http.StatusBadRequest, "请填写有效邮箱")
+		if account == "" {
+			Fail(c, http.StatusBadRequest, "请填写登录账号")
 			return
 		}
-		u, temp, created, err := s.store.EnsureUserByEmail(email, strings.TrimSpace(req.Name))
+		u, temp, created, err := s.store.EnsureUserByAccount(account, strings.TrimSpace(req.Name))
 		if err != nil {
 			Fail(c, http.StatusInternalServerError, "创建账号失败")
 			return

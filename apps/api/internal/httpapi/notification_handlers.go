@@ -45,9 +45,9 @@ func (s *Server) handleMarkAllNotificationsRead(c *gin.Context) {
 	OK(c, gin.H{"ok": true})
 }
 
-// notifyAssigned alerts the new assignee (including assign-to-self).
+// notifyAssigned alerts the new assignee; skip when assigning to self.
 func (s *Server) notifyAssigned(actorID string, it *issue.Issue) {
-	if it == nil || it.AssigneeID == "" {
+	if it == nil || it.AssigneeID == "" || it.AssigneeID == actorID {
 		return
 	}
 	_ = s.store.CreateNotification(it.AssigneeID, actorID, notification.KindAssigned, it, "")

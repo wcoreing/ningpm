@@ -5,12 +5,14 @@ import { getToken } from "../lib/api"
 const props = withDefaults(
   defineProps<{
     name?: string
+    account?: string
     email?: string
     avatarUrl?: string
     size?: "sm" | "md" | "lg"
   }>(),
   {
     name: "",
+    account: "",
     email: "",
     avatarUrl: "",
     size: "md",
@@ -20,8 +22,10 @@ const props = withDefaults(
 const imgFailed = ref(false)
 const objectUrl = ref("")
 
+const identity = computed(() => props.account || props.email || "")
+
 const initials = computed(() => {
-  const raw = (props.name || props.email || "?").trim()
+  const raw = (props.name || identity.value || "?").trim()
   if (!raw) return "?"
   const parts = raw.split(/[\s@._-]+/).filter(Boolean)
   if (parts.length >= 2) {
@@ -41,7 +45,7 @@ const palette = [
 ]
 
 const colors = computed(() => {
-  const key = props.email || props.name || "u"
+  const key = identity.value || props.name || "u"
   let h = 0
   for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0
   return palette[h % palette.length]
@@ -82,7 +86,7 @@ watch(
     class="avatar"
     :class="`avatar--${size}`"
     :style="showImg ? undefined : { color: colors[0], background: colors[1] }"
-    :title="name || email"
+    :title="name || account || email"
   >
     <img v-if="showImg && objectUrl" :src="objectUrl" alt="" />
     <span v-else>{{ initials }}</span>

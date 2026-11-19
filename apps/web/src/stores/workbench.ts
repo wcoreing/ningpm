@@ -7,6 +7,7 @@ export type WorkbenchQuery = {
   projectId?: string
   type?: string
   status?: string
+  due?: string
   mine?: boolean
 }
 
@@ -32,6 +33,7 @@ export const useWorkbenchStore = defineStore("workbench", () => {
       if (query.status && query.status !== "all" && query.status !== "open") {
         q.set("status", query.status)
       }
+      if (query.due && query.due !== "all") q.set("due", query.due)
       issues.value = await api<Issue[]>(`/api/issues?${q.toString()}`)
     } catch (e) {
       error.value = e instanceof Error ? e.message : "加载失败"

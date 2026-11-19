@@ -9,9 +9,9 @@ import (
 
 // Claims is the JWT payload.
 type Claims struct {
-	UserID string `json:"uid"`
-	Name   string `json:"name"`
-	Email  string `json:"email"`
+	UserID  string `json:"uid"`
+	Name    string `json:"name"`
+	Account string `json:"account"`
 	jwt.RegisteredClaims
 }
 
@@ -27,11 +27,11 @@ func NewManager(secret string) *Manager {
 }
 
 // Issue creates a signed token for a user.
-func (m *Manager) Issue(userID, name, email string) (string, error) {
+func (m *Manager) Issue(userID, name, account string) (string, error) {
 	claims := Claims{
-		UserID: userID,
-		Name:   name,
-		Email:  email,
+		UserID:  userID,
+		Name:    name,
+		Account: account,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(m.ttl)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),

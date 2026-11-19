@@ -17,7 +17,7 @@ export type CreateIssueBody = {
 
 export type AddMemberBody =
   | { userId: string; role: string }
-  | { email: string; name?: string; role: string }
+  | { account: string; name?: string; role: string }
 
 export const useProjectStore = defineStore("project", () => {
   const auth = useAuthStore()
@@ -38,6 +38,7 @@ export const useProjectStore = defineStore("project", () => {
     members.value.map((m) => ({
       id: m.userId,
       name: m.name,
+      account: m.account,
       email: m.email,
       avatarUrl: m.avatarUrl,
     })),
@@ -107,20 +108,53 @@ export const useProjectStore = defineStore("project", () => {
   }
 
   async function moveIssue(issueId: string, status: string) {
+    return reorderBoard(issueId, { status })
+  }
+
+  /** 看板排序：beforeId 上方、afterId 下方；都空则置顶（按最后修改） */
+  async function reorderBoard(
+    issueId: string,
+    body: { status: string; beforeId?: string; afterId?: string },
+  ) {
     const prev = issues.value
+    const now = Date.now()
+    const moving = issues.value.find((i) => i.id === issueId)
+    let optimisticOrder = now
+    if (body.beforeId || body.afterId) {
+      const before = body.beforeId ? issues.value.find((i) => i.id === body.beforeId) : undefined
+      const after = body.afterId ? issues.value.find((i) => i.id === body.afterId) : undefined
+      if (before && after) optimisticOrder = ((before.boardOrder || 0) + (after.boardOrder || 0)) / 2
+      else if (before) optimisticOrder = (before.boardOrder || now) - 1000
+      else if (after) optimisticOrder = (after.boardOrder || now) + 1000
+    }
     issues.value = issues.value.map((i) =>
-      i.id === issueId ? { ...i, status: status as Issue["status"] } : i,
+      i.id === issueId
+        ? {
+            ...i,
+            status: body.status as Issue["status"],
+            boardOrder: optimisticOrder,
+            updatedAt: moving?.updatedAt || i.updatedAt,
+          }
+        : i,
     )
     try {
-      const updated = await api<Issue>(`/api/issues/${issueId}/status`, {
+      const updated = await api<Issue>(`/api/issues/${issueId}/board`, {
         method: "PATCH",
-        body: JSON.stringify({ status }),
+        body: JSON.stringify(body),
       })
       upsertIssue(updated)
+      if (updated.parentId) {
+        try {
+          const parent = await api<Issue>(`/api/issues/${updated.parentId}`)
+          upsertIssue(parent)
+        } catch {
+          /* parent refresh best-effort */
+        }
+      }
       return updated
     } catch (e) {
       issues.value = prev
-      error.value = e instanceof Error ? e.message : "更新状态失败"
+      error.value = e instanceof Error ? e.message : "更新看板失败"
       throw e
     }
   }
@@ -142,6 +176,7 @@ export const useProjectStore = defineStore("project", () => {
         {
           id: res.member.userId,
           name: res.member.name,
+          account: res.member.account,
           email: res.member.email,
           avatarUrl: res.member.avatarUrl,
         },
@@ -244,6 +279,7 @@ export const useProjectStore = defineStore("project", () => {
     upsertIssue,
     createIssue,
     moveIssue,
+    reorderBoard,
     addMember,
     changeRole,
     removeMember,

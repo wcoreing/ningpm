@@ -5,13 +5,15 @@ import (
 	"time"
 )
 
-// User 是系统账号。
+// User 是系统账号。Account 为登录标识；Name 为显示用户名；Email 可选联系邮箱。
 type User struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
-	Email        string    `json:"email"`
+	Account      string    `json:"account"`
+	Email        string    `json:"email,omitempty"`
 	Avatar       string    `json:"-"` // resource id；空则前端用默认字母头像
 	PasswordHash string    `json:"-"`
+	IsAdmin      bool      `json:"isAdmin"`
 	CreatedAt    time.Time `json:"createdAt"`
 }
 

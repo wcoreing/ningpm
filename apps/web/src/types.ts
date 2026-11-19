@@ -29,9 +29,12 @@ export type Issue = {
   moduleName?: string
   parentId?: string
   parentKey?: string
+  startDate?: string
+  dueDate?: string
   childCount?: number
   childDoneCount?: number
   attachmentCount?: number
+  boardOrder?: number
   creatorId: string
   createdAt: string
   updatedAt: string
@@ -68,7 +71,8 @@ export type Cycle = {
 export type UserOption = {
   id: string
   name: string
-  email: string
+  account: string
+  email?: string
   avatarUrl?: string
 }
 
@@ -85,7 +89,8 @@ export type ProjectMember = {
   projectId: string
   userId: string
   name: string
-  email: string
+  account: string
+  email?: string
   avatarUrl?: string
   role: "owner" | "admin" | "member" | "viewer"
   joinedAt: string

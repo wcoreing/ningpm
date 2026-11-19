@@ -6,7 +6,7 @@ import { useAuthStore } from "../stores/auth"
 
 const auth = useAuthStore()
 const router = useRouter()
-const email = ref("admin@ningpm.local")
+const account = ref("admin@ningpm.local")
 const password = ref("admin123")
 const error = ref("")
 const loading = ref(false)
@@ -15,7 +15,7 @@ async function onSubmit() {
   error.value = ""
   loading.value = true
   try {
-    await auth.login(email.value.trim(), password.value)
+    await auth.login(account.value.trim(), password.value)
     router.replace("/")
   } catch (e) {
     error.value = e instanceof Error ? e.message : "登录失败"
@@ -29,21 +29,21 @@ async function onSubmit() {
   <div class="login">
     <div class="login-panel">
       <div class="login-aside" aria-hidden="true">
-        <div class="aside-mark" />
+        <img class="aside-mark" src="/logo.png" alt="" width="44" height="44" />
         <p class="aside-brand">ningpm</p>
         <p class="aside-copy">把需求、任务与缺陷收进同一条执行流。</p>
       </div>
       <NpSurface class="login-card">
         <div class="brand">
-          <div class="mark" />
+          <img class="mark" src="/logo.png" alt="" width="40" height="40" />
           <div>
             <h1>欢迎回来</h1>
           </div>
         </div>
 
         <form class="form" @submit.prevent="onSubmit">
-          <NpField label="邮箱">
-            <NpInput v-model="email" type="email" placeholder="admin@ningpm.local" />
+          <NpField label="账号">
+            <NpInput v-model="account" type="text" autocomplete="username" placeholder="登录账号" />
           </NpField>
           <NpField label="密码">
             <NpInput v-model="password" type="password" placeholder="密码" />
@@ -54,7 +54,7 @@ async function onSubmit() {
           </NpButton>
         </form>
 
-        <p class="hint">演示账号：admin@ningpm.local / admin123</p>
+        <p class="hint">演示账号：admin@ningpm.local（账号）/ admin123</p>
       </NpSurface>
     </div>
   </div>
@@ -94,12 +94,13 @@ async function onSubmit() {
 }
 
 .aside-mark {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
   margin-bottom: auto;
-  background: linear-gradient(145deg, var(--np-accent-hover), var(--np-accent-active));
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 22%);
+  display: block;
+  object-fit: cover;
+  box-shadow: 0 8px 20px rgb(64 158 255 / 28%);
 }
 
 .aside-brand {
@@ -137,8 +138,9 @@ async function onSubmit() {
   width: 40px;
   height: 40px;
   border-radius: 12px;
-  background: linear-gradient(145deg, var(--np-accent-hover), var(--np-accent-active));
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 22%);
+  display: block;
+  object-fit: cover;
+  box-shadow: 0 4px 12px rgb(64 158 255 / 22%);
 }
 
 .brand h1 {

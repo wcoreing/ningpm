@@ -18,9 +18,6 @@ const headerTitle = computed(
   () => pageHeader.override?.title || String(route.meta.title || "工作台"),
 )
 const headerBadge = computed(() => pageHeader.override?.badge || "")
-const headerSubtitle = computed(
-  () => pageHeader.override?.subtitle || String(route.meta.subtitle || ""),
-)
 
 onMounted(() => {
   void auth.fetchMe()
@@ -40,6 +37,13 @@ function logout() {
     <template #nav>
       <NpNavItem href="#/" :active="route.path === '/'">工作台</NpNavItem>
       <NpNavItem href="#/projects" :active="route.path.startsWith('/projects')">项目</NpNavItem>
+      <NpNavItem
+        v-if="auth.isAdmin"
+        href="#/users"
+        :active="route.path.startsWith('/users')"
+      >
+        账号管理
+      </NpNavItem>
     </template>
 
     <template #header>
@@ -48,7 +52,6 @@ function logout() {
           <NpBadge v-if="headerBadge" tone="accent">{{ headerBadge }}</NpBadge>
           <h1>{{ headerTitle }}</h1>
         </div>
-        <p v-if="headerSubtitle">{{ headerSubtitle }}</p>
       </div>
       <div class="header-actions">
         <NotificationBell />
@@ -72,7 +75,7 @@ function logout() {
 .header-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -83,15 +86,13 @@ function logout() {
 .header-title h1 {
   margin: 0;
   font-family: var(--np-font-display);
-  font-size: var(--np-text-xl);
+  font-size: var(--np-text-md);
   font-weight: 700;
-  letter-spacing: -0.04em;
-}
-
-.header-title p {
-  margin: 4px 0 0;
-  color: var(--np-text-secondary);
-  font-size: var(--np-text-sm);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .header-actions {
@@ -99,11 +100,10 @@ function logout() {
   align-items: center;
   gap: 2px;
   flex-shrink: 0;
-  padding: 4px;
-  border: 1px solid var(--np-border);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--np-bg-elevated) 88%, transparent);
-  box-shadow: var(--np-shadow-sm);
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
 }
 
 .header-actions :deep(.is-on) {

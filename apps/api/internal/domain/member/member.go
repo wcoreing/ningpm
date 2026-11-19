@@ -17,7 +17,8 @@ type Member struct {
 	ProjectID string    `json:"projectId"`
 	UserID    string    `json:"userId"`
 	Name      string    `json:"name"`
-	Email     string    `json:"email"`
+	Account   string    `json:"account"`
+	Email     string    `json:"email,omitempty"`
 	AvatarURL string    `json:"avatarUrl,omitempty"`
 	Role      Role      `json:"role"`
 	JoinedAt  time.Time `json:"joinedAt"`

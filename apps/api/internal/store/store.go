@@ -226,10 +226,11 @@ func (s *Store) migrate() error {
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS users (
   id %s PRIMARY KEY,
   name TEXT NOT NULL,
-  email %s NOT NULL UNIQUE,
+  account %s NOT NULL UNIQUE,
+  email %s,
   password_hash TEXT NOT NULL,
   created_at %s NOT NULL
-)`, id, id, tm),
+)`, id, id, id, tm),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS projects (
   id %s PRIMARY KEY,
   %s %s NOT NULL UNIQUE,
@@ -335,7 +336,19 @@ func (s *Store) migrate() error {
 	if err := s.ensureIssueParentColumn(); err != nil {
 		return err
 	}
+	if err := s.ensureIssueScheduleColumns(); err != nil {
+		return err
+	}
+	if err := s.ensureIssueBoardOrderColumn(); err != nil {
+		return err
+	}
 	if err := s.ensureUserAvatarColumn(); err != nil {
+		return err
+	}
+	if err := s.ensureUserAccountColumn(); err != nil {
+		return err
+	}
+	if err := s.ensureUserIsAdminColumn(); err != nil {
 		return err
 	}
 	if err := s.ensureResourceTables(); err != nil {
@@ -389,6 +402,65 @@ func (s *Store) ensureIssueParentColumn() error {
 	return s.ensureIssueColumn("parent_id")
 }
 
+func (s *Store) ensureIssueScheduleColumns() error {
+	if err := s.ensureIssueTextColumn("due_date"); err != nil {
+		return err
+	}
+	return s.ensureIssueTextColumn("start_date")
+}
+
+// ensureIssueBoardOrderColumn adds board_order and backfills from updated_at (last-modified default).
+func (s *Store) ensureIssueBoardOrderColumn() error {
+	has, err := s.hasColumn("issues", "board_order")
+	if err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE issues ADD COLUMN board_order REAL NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+		rows, err := s.db.Query(`SELECT id, updated_at FROM issues`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type row struct {
+			id      string
+			updated string
+		}
+		var list []row
+		for rows.Next() {
+			var r row
+			if err := rows.Scan(&r.id, &r.updated); err != nil {
+				return err
+			}
+			list = append(list, r)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, r := range list {
+			t, err := time.Parse(time.RFC3339, r.updated)
+			if err != nil {
+				t = time.Now().UTC()
+			}
+			if _, err := s.db.Exec(`UPDATE issues SET board_order=? WHERE id=?`, float64(t.UnixMilli()), r.id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureIssueTextColumn(col string) error {
+	has, err := s.hasColumn("issues", col)
+	if err != nil || has {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE issues ADD COLUMN ` + col + ` TEXT NULL`)
+	return err
+}
+
 func (s *Store) hasColumn(table, col string) (bool, error) {
 	if s.driver == "mysql" {
 		var n int
@@ -426,6 +498,53 @@ func (s *Store) ensureUserAvatarColumn() error {
 	}
 	_, err = s.db.Exec(`ALTER TABLE users ADD COLUMN avatar ` + s.idType() + ` NOT NULL DEFAULT ''`)
 	return err
+}
+
+func (s *Store) ensureUserIsAdminColumn() error {
+	has, err := s.hasColumn("users", "is_admin")
+	if err != nil {
+		return err
+	}
+	if !has {
+		col := "INTEGER NOT NULL DEFAULT 0"
+		if s.driver == "mysql" {
+			col = "TINYINT(1) NOT NULL DEFAULT 0"
+		}
+		if _, err := s.db.Exec(`ALTER TABLE users ADD COLUMN is_admin ` + col); err != nil {
+			return err
+		}
+	}
+	// 引导账号：历史 admin@ningpm.local 自动升级为系统管理员
+	_, err = s.db.Exec(`UPDATE users SET is_admin = 1 WHERE email = ? OR account = ?`, "admin@ningpm.local", "admin@ningpm.local")
+	return err
+}
+
+// ensureUserAccountColumn adds login account and backfills from legacy email.
+func (s *Store) ensureUserAccountColumn() error {
+	has, err := s.hasColumn("users", "account")
+	if err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE users ADD COLUMN account TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	// backfill from email for rows still empty
+	if _, err := s.db.Exec(`UPDATE users SET account = email WHERE account = '' OR account IS NULL`); err != nil {
+		return err
+	}
+	// unique index (ignore if exists)
+	_, _ = s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_account ON users(account)`)
+	if s.driver == "mysql" {
+		var n int
+		_ = s.db.QueryRow(`SELECT COUNT(1) FROM information_schema.STATISTICS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND INDEX_NAME = 'idx_users_account'`).Scan(&n)
+		if n == 0 {
+			_, _ = s.db.Exec(`CREATE UNIQUE INDEX idx_users_account ON users(account)`)
+		}
+	}
+	return nil
 }
 
 func (s *Store) ensureIssueColumn(col string) error {
@@ -571,8 +690,8 @@ func (s *Store) ensureDemoInvitePool() error {
 			return err
 		}
 		if _, err := s.db.Exec(
-			`INSERT INTO users(id, name, email, password_hash, created_at) VALUES(?,?,?,?,?)`,
-			uuid.NewString(), su.name, su.email, string(hash), now,
+			`INSERT INTO users(id, name, account, email, password_hash, is_admin, created_at) VALUES(?,?,?,?,?,?,?)`,
+			uuid.NewString(), su.name, su.email, su.email, string(hash), 0, now,
 		); err != nil {
 			return err
 		}
@@ -636,8 +755,8 @@ func (s *Store) SeedDemo() error {
 	}
 	now := time.Now().UTC()
 	if _, err := s.db.Exec(
-		`INSERT INTO users(id, name, email, password_hash, created_at) VALUES(?,?,?,?,?)`,
-		adminID, "管理员", "admin@ningpm.local", string(hash), now.Format(time.RFC3339),
+		`INSERT INTO users(id, name, account, email, password_hash, is_admin, created_at) VALUES(?,?,?,?,?,?,?)`,
+		adminID, "管理员", "admin@ningpm.local", "admin@ningpm.local", string(hash), 1, now.Format(time.RFC3339),
 	); err != nil {
 		return err
 	}
@@ -645,8 +764,8 @@ func (s *Store) SeedDemo() error {
 	pmID := uuid.NewString()
 	pmHash, _ := bcrypt.GenerateFromPassword([]byte("pm123456"), bcrypt.DefaultCost)
 	if _, err := s.db.Exec(
-		`INSERT INTO users(id, name, email, password_hash, created_at) VALUES(?,?,?,?,?)`,
-		pmID, "产品经理", "pm@ningpm.local", string(pmHash), now.Format(time.RFC3339),
+		`INSERT INTO users(id, name, account, email, password_hash, is_admin, created_at) VALUES(?,?,?,?,?,?,?)`,
+		pmID, "产品经理", "pm@ningpm.local", "pm@ningpm.local", string(pmHash), 0, now.Format(time.RFC3339),
 	); err != nil {
 		return err
 	}
@@ -732,35 +851,90 @@ func (s *Store) SeedDemo() error {
 
 // --- users ---
 
-func (s *Store) GetUserByEmail(email string) (*user.User, error) {
-	row := s.db.QueryRow(`SELECT id, name, email, COALESCE(avatar,''), password_hash, created_at FROM users WHERE email = ?`, email)
+const userSelectCols = `id, name, COALESCE(account,''), COALESCE(email,''), COALESCE(avatar,''), password_hash, COALESCE(is_admin, 0), created_at`
+
+func (s *Store) GetUserByAccount(account string) (*user.User, error) {
+	account = strings.TrimSpace(account)
+	row := s.db.QueryRow(`SELECT `+userSelectCols+` FROM users WHERE account = ? OR ((account = '' OR account IS NULL) AND email = ?)`, account, account)
 	return scanUser(row)
+}
+
+// GetUserByEmail is a legacy alias for GetUserByAccount.
+func (s *Store) GetUserByEmail(email string) (*user.User, error) {
+	return s.GetUserByAccount(email)
 }
 
 func (s *Store) GetUserByID(id string) (*user.User, error) {
-	row := s.db.QueryRow(`SELECT id, name, email, COALESCE(avatar,''), password_hash, created_at FROM users WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT `+userSelectCols+` FROM users WHERE id = ?`, id)
 	return scanUser(row)
 }
 
-// CreateUser inserts a user with an already-hashed or plain password (plain preferred).
-func (s *Store) CreateUser(name, email, plainPassword string) (*user.User, error) {
+// CreateUser inserts a normal user.
+func (s *Store) CreateUser(name, account, plainPassword string) (*user.User, error) {
+	return s.CreateUserAdmin(name, account, plainPassword, false)
+}
+
+// AllocateLoginAccount returns a unique login id. Prefer account if non-empty;
+// otherwise derive from display name.
+func (s *Store) AllocateLoginAccount(account, name string) (string, error) {
+	account = strings.TrimSpace(account)
+	if account != "" {
+		if _, err := s.GetUserByAccount(account); err == nil {
+			return "", fmt.Errorf("account taken")
+		} else if err != sql.ErrNoRows {
+			return "", err
+		}
+		return account, nil
+	}
+	base := strings.TrimSpace(name)
+	if base == "" {
+		base = "user"
+	}
+	base = strings.Join(strings.Fields(base), "")
+	candidate := base
+	for i := 0; i < 20; i++ {
+		if _, err := s.GetUserByAccount(candidate); err == sql.ErrNoRows {
+			return candidate, nil
+		} else if err != nil {
+			return "", err
+		}
+		candidate = fmt.Sprintf("%s_%s", base, uuid.NewString()[:4])
+	}
+	return fmt.Sprintf("%s_%s", base, uuid.NewString()[:8]), nil
+}
+
+// CreateUserAdmin creates a user and optionally marks them as system admin.
+func (s *Store) CreateUserAdmin(name, account, plainPassword string, isAdmin bool) (*user.User, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(plainPassword), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, err
 	}
+	login := strings.TrimSpace(account)
 	u := &user.User{
 		ID:           uuid.NewString(),
 		Name:         strings.TrimSpace(name),
-		Email:        strings.ToLower(strings.TrimSpace(email)),
+		Account:      login,
+		Email:        "",
 		PasswordHash: string(hash),
+		IsAdmin:      isAdmin,
 		CreatedAt:    time.Now().UTC(),
 	}
 	if u.Name == "" {
-		u.Name = strings.Split(u.Email, "@")[0]
+		u.Name = login
+	}
+	adminVal := 0
+	if isAdmin {
+		adminVal = 1
+	}
+	// legacy schemas keep email NOT NULL UNIQUE; mirror account when contact email omitted
+	email := u.Email
+	if email == "" {
+		email = u.Account
+		u.Email = email
 	}
 	_, err = s.db.Exec(
-		`INSERT INTO users(id, name, email, password_hash, created_at) VALUES(?,?,?,?,?)`,
-		u.ID, u.Name, u.Email, u.PasswordHash, u.CreatedAt.Format(time.RFC3339),
+		`INSERT INTO users(id, name, account, email, password_hash, is_admin, created_at) VALUES(?,?,?,?,?,?,?)`,
+		u.ID, u.Name, u.Account, email, u.PasswordHash, adminVal, u.CreatedAt.Format(time.RFC3339),
 	)
 	if err != nil {
 		return nil, err
@@ -802,13 +976,13 @@ func (s *Store) UpdateUserPassword(userID, currentPassword, newPassword string) 
 	return err
 }
 
-// EnsureUserByEmail returns an existing user, or creates one with a temporary password.
-func (s *Store) EnsureUserByEmail(email, name string) (u *user.User, tempPassword string, created bool, err error) {
-	email = strings.ToLower(strings.TrimSpace(email))
-	if email == "" {
-		return nil, "", false, fmt.Errorf("email required")
+// EnsureUserByAccount returns an existing user, or creates one with a temporary password.
+func (s *Store) EnsureUserByAccount(account, name string) (u *user.User, tempPassword string, created bool, err error) {
+	account = strings.TrimSpace(account)
+	if account == "" {
+		return nil, "", false, fmt.Errorf("account required")
 	}
-	u, err = s.GetUserByEmail(email)
+	u, err = s.GetUserByAccount(account)
 	if err == nil {
 		return u, "", false, nil
 	}
@@ -816,11 +990,19 @@ func (s *Store) EnsureUserByEmail(email, name string) (u *user.User, tempPasswor
 		return nil, "", false, err
 	}
 	tempPassword = randomPassword(10)
-	u, err = s.CreateUser(name, email, tempPassword)
+	if strings.TrimSpace(name) == "" {
+		name = account
+	}
+	u, err = s.CreateUser(name, account, tempPassword)
 	if err != nil {
 		return nil, "", false, err
 	}
 	return u, tempPassword, true, nil
+}
+
+// EnsureUserByEmail is a legacy alias for EnsureUserByAccount.
+func (s *Store) EnsureUserByEmail(email, name string) (u *user.User, tempPassword string, created bool, err error) {
+	return s.EnsureUserByAccount(email, name)
 }
 
 func randomPassword(n int) string {
@@ -837,7 +1019,7 @@ func randomPassword(n int) string {
 }
 
 func (s *Store) ListUsers() ([]user.User, error) {
-	rows, err := s.db.Query(`SELECT id, name, email, COALESCE(avatar,''), password_hash, created_at FROM users ORDER BY created_at`)
+	rows, err := s.db.Query(`SELECT ` + userSelectCols + ` FROM users ORDER BY is_admin DESC, created_at ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -853,12 +1035,136 @@ func (s *Store) ListUsers() ([]user.User, error) {
 	return out, rows.Err()
 }
 
+// UpdateUserAdmin updates profile fields for system user management.
+func (s *Store) UpdateUserAdmin(userID, name, account, newPassword string, isAdmin *bool) (*user.User, error) {
+	u, err := s.GetUserByID(userID)
+	if err != nil {
+		return nil, err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = u.Name
+	}
+	account = strings.TrimSpace(account)
+	if account == "" {
+		account = u.Account
+		if account == "" {
+			account = u.Email
+		}
+	}
+	cur := u.Account
+	if cur == "" {
+		cur = u.Email
+	}
+	if account != cur {
+		if other, err := s.GetUserByAccount(account); err == nil && other.ID != userID {
+			return nil, fmt.Errorf("account taken")
+		} else if err != nil && err != sql.ErrNoRows {
+			return nil, err
+		}
+	}
+	adminVal := 0
+	if u.IsAdmin {
+		adminVal = 1
+	}
+	if isAdmin != nil {
+		if *isAdmin {
+			adminVal = 1
+		} else {
+			adminVal = 0
+		}
+	}
+	if _, err := s.db.Exec(
+		`UPDATE users SET name=?, account=?, is_admin=? WHERE id=?`,
+		name, account, adminVal, userID,
+	); err != nil {
+		return nil, err
+	}
+	if pwd := strings.TrimSpace(newPassword); pwd != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(pwd), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.db.Exec(`UPDATE users SET password_hash=? WHERE id=?`, string(hash), userID); err != nil {
+			return nil, err
+		}
+	}
+	return s.GetUserByID(userID)
+}
+
+// CountAdmins returns how many system admins exist.
+func (s *Store) CountAdmins() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(1) FROM users WHERE is_admin = 1`).Scan(&n)
+	return n, err
+}
+
+// DeleteUser removes a user; non-nullable author/creator refs are moved to fallbackUserID.
+func (s *Store) DeleteUser(userID, fallbackUserID string) error {
+	if strings.TrimSpace(fallbackUserID) == "" || fallbackUserID == userID {
+		return fmt.Errorf("invalid fallback user")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`DELETE FROM project_members WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM notifications WHERE user_id = ? OR actor_id = ?`, userID, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE issues SET assignee_id = NULL WHERE assignee_id = ?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE modules SET lead_id = NULL WHERE lead_id = ?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE projects SET creator_id = ? WHERE creator_id = ?`, fallbackUserID, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE issues SET creator_id = ? WHERE creator_id = ?`, fallbackUserID, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE comments SET author_id = ? WHERE author_id = ?`, fallbackUserID, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE resources SET uploader_id = ? WHERE uploader_id = ?`, fallbackUserID, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE issue_attachments SET created_by = ? WHERE created_by = ?`, fallbackUserID, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE project_files SET created_by = ? WHERE created_by = ?`, fallbackUserID, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE users SET avatar = '' WHERE id = ?`, userID); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM users WHERE id = ?`, userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return tx.Commit()
+}
+
 func scanUser(row *sql.Row) (*user.User, error) {
 	var u user.User
 	var created string
-	if err := row.Scan(&u.ID, &u.Name, &u.Email, &u.Avatar, &u.PasswordHash, &created); err != nil {
+	var adminInt int
+	if err := row.Scan(&u.ID, &u.Name, &u.Account, &u.Email, &u.Avatar, &u.PasswordHash, &adminInt, &created); err != nil {
 		return nil, err
 	}
+	if u.Account == "" {
+		u.Account = u.Email
+	}
+	u.IsAdmin = adminInt != 0
 	u.CreatedAt, _ = time.Parse(time.RFC3339, created)
 	return &u, nil
 }
@@ -866,9 +1172,14 @@ func scanUser(row *sql.Row) (*user.User, error) {
 func scanUserRows(rows *sql.Rows) (*user.User, error) {
 	var u user.User
 	var created string
-	if err := rows.Scan(&u.ID, &u.Name, &u.Email, &u.Avatar, &u.PasswordHash, &created); err != nil {
+	var adminInt int
+	if err := rows.Scan(&u.ID, &u.Name, &u.Account, &u.Email, &u.Avatar, &u.PasswordHash, &adminInt, &created); err != nil {
 		return nil, err
 	}
+	if u.Account == "" {
+		u.Account = u.Email
+	}
+	u.IsAdmin = adminInt != 0
 	u.CreatedAt, _ = time.Parse(time.RFC3339, created)
 	return &u, nil
 }
@@ -974,8 +1285,9 @@ type IssueFilter struct {
 	CycleID    string
 	ModuleID   string
 	ParentID   string
-	RootsOnly  bool // true => parent_id IS NULL（看板默认）
-	Backlog    bool // true => cycle_id IS NULL
+	Due        string // overdue | week | none | all | ""
+	RootsOnly  bool   // true => parent_id IS NULL（看板默认）
+	Backlog    bool   // true => cycle_id IS NULL
 	MineOnly   bool
 	UserID     string
 }
@@ -1002,14 +1314,19 @@ func (s *Store) CreateIssue(it *issue.Issue) error {
 	now := time.Now().UTC()
 	it.CreatedAt = now
 	it.UpdatedAt = now
+	it.BoardOrder = float64(now.UnixMilli())
 	_, err = s.db.Exec(
-		`INSERT INTO issues(id, project_id, number, type, title, description, status, priority, assignee_id, creator_id, created_at, updated_at, cycle_id, module_id, parent_id)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO issues(id, project_id, number, type, title, description, status, priority, assignee_id, creator_id, created_at, updated_at, cycle_id, module_id, parent_id, start_date, due_date, board_order)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		it.ID, it.ProjectID, it.Number, it.Type, it.Title, it.Description, it.Status, it.Priority, nullStr(it.AssigneeID), it.CreatorID,
 		it.CreatedAt.Format(time.RFC3339), it.UpdatedAt.Format(time.RFC3339), nullStr(it.CycleID), nullStr(it.ModuleID), nullStr(it.ParentID),
+		nullStr(it.StartDate), nullStr(it.DueDate), it.BoardOrder,
 	)
 	if err != nil {
 		return err
+	}
+	if it.ParentID != "" {
+		_ = s.syncIssueProgressFromChildren(it.ParentID)
 	}
 	return s.hydrateIssue(it)
 }
@@ -1023,6 +1340,8 @@ SELECT i.id, i.project_id, ` + pk + `, p.name, i.number, i.type, i.title, i.desc
        COALESCE(i.module_id, ''), COALESCE(m.name, ''),
        COALESCE(i.parent_id, ''),
        CASE WHEN pi.id IS NULL THEN '' ELSE ` + parentKey + ` END,
+       COALESCE(i.start_date, ''), COALESCE(i.due_date, ''),
+       COALESCE(i.board_order, 0),
        i.creator_id, i.created_at, i.updated_at,
        (SELECT COUNT(1) FROM issues ch WHERE ch.parent_id = i.id),
        (SELECT COUNT(1) FROM issues ch WHERE ch.parent_id = i.id AND ch.status = 'done'),
@@ -1081,7 +1400,19 @@ WHERE 1=1`
 		q += ` AND i.assignee_id = ?`
 		args = append(args, f.UserID)
 	}
-	q += ` ORDER BY i.priority ASC, i.updated_at DESC`
+	today := time.Now().UTC().Format("2006-01-02")
+	switch strings.ToLower(strings.TrimSpace(f.Due)) {
+	case "overdue":
+		q += ` AND i.due_date IS NOT NULL AND i.due_date != '' AND i.due_date < ? AND i.status != ?`
+		args = append(args, today, issue.StatusDone)
+	case "week":
+		end := time.Now().UTC().AddDate(0, 0, 7).Format("2006-01-02")
+		q += ` AND i.due_date IS NOT NULL AND i.due_date != '' AND i.due_date >= ? AND i.due_date <= ?`
+		args = append(args, today, end)
+	case "none":
+		q += ` AND (i.due_date IS NULL OR i.due_date = '')`
+	}
+	q += ` ORDER BY i.board_order DESC, i.updated_at DESC`
 
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
@@ -1108,21 +1439,192 @@ func (s *Store) GetIssue(id string) (*issue.Issue, error) {
 func (s *Store) UpdateIssue(it *issue.Issue) error {
 	it.UpdatedAt = time.Now().UTC()
 	_, err := s.db.Exec(
-		`UPDATE issues SET type=?, title=?, description=?, status=?, priority=?, assignee_id=?, cycle_id=?, module_id=?, updated_at=? WHERE id=?`,
-		it.Type, it.Title, it.Description, it.Status, it.Priority, nullStr(it.AssigneeID), nullStr(it.CycleID), nullStr(it.ModuleID), it.UpdatedAt.Format(time.RFC3339), it.ID,
+		`UPDATE issues SET type=?, title=?, description=?, status=?, priority=?, assignee_id=?, cycle_id=?, module_id=?, start_date=?, due_date=?, updated_at=? WHERE id=?`,
+		it.Type, it.Title, it.Description, it.Status, it.Priority, nullStr(it.AssigneeID), nullStr(it.CycleID), nullStr(it.ModuleID),
+		nullStr(it.StartDate), nullStr(it.DueDate), it.UpdatedAt.Format(time.RFC3339), it.ID,
 	)
 	if err != nil {
 		return err
 	}
+	_ = s.SyncParentFromChildren(it.ID)
 	return s.hydrateIssue(it)
 }
 
 func (s *Store) UpdateIssueStatus(id string, status issue.Status) (*issue.Issue, error) {
-	_, err := s.db.Exec(`UPDATE issues SET status=?, updated_at=? WHERE id=?`, status, time.Now().UTC().Format(time.RFC3339), id)
+	now := time.Now().UTC()
+	// 改状态且未指定落点：按最后修改沉到该泳道顶部
+	_, err := s.db.Exec(
+		`UPDATE issues SET status=?, board_order=?, updated_at=? WHERE id=?`,
+		status, float64(now.UnixMilli()), now.Format(time.RFC3339), id,
+	)
 	if err != nil {
 		return nil, err
 	}
+	_ = s.SyncParentFromChildren(id)
 	return s.GetIssue(id)
+}
+
+const boardOrderGap = 1000.0
+
+// ReorderIssueBoard moves an issue into a status lane at a relative position.
+// beforeID is the card that should sit above; afterID is the card below.
+// When both empty, the card goes to the top of the lane (last-modified order).
+func (s *Store) ReorderIssueBoard(id string, status issue.Status, beforeID, afterID string) (*issue.Issue, error) {
+	current, err := s.GetIssue(id)
+	if err != nil {
+		return nil, err
+	}
+	order, err := s.computeBoardOrder(current.ProjectID, status, id, beforeID, afterID)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	_, err = s.db.Exec(
+		`UPDATE issues SET status=?, board_order=?, updated_at=? WHERE id=?`,
+		status, order, now.Format(time.RFC3339), id,
+	)
+	if err != nil {
+		return nil, err
+	}
+	_ = s.SyncParentFromChildren(id)
+	return s.GetIssue(id)
+}
+
+func (s *Store) computeBoardOrder(projectID string, status issue.Status, movingID, beforeID, afterID string) (float64, error) {
+	var beforeOrder, afterOrder float64
+	hasBefore, hasAfter := false, false
+	if beforeID != "" && beforeID != movingID {
+		it, err := s.GetIssue(beforeID)
+		if err != nil {
+			return 0, err
+		}
+		if it.ProjectID != projectID {
+			return 0, fmt.Errorf("before issue project mismatch")
+		}
+		beforeOrder = it.BoardOrder
+		hasBefore = true
+	}
+	if afterID != "" && afterID != movingID {
+		it, err := s.GetIssue(afterID)
+		if err != nil {
+			return 0, err
+		}
+		if it.ProjectID != projectID {
+			return 0, fmt.Errorf("after issue project mismatch")
+		}
+		afterOrder = it.BoardOrder
+		hasAfter = true
+	}
+	switch {
+	case hasBefore && hasAfter:
+		mid := (beforeOrder + afterOrder) / 2
+		if mid != beforeOrder && mid != afterOrder {
+			return mid, nil
+		}
+		// 间距耗尽时重新铺开该泳道
+		if err := s.resequenceBoardLane(projectID, status, movingID); err != nil {
+			return 0, err
+		}
+		return s.computeBoardOrder(projectID, status, movingID, beforeID, afterID)
+	case hasBefore:
+		return beforeOrder - boardOrderGap, nil
+	case hasAfter:
+		return afterOrder + boardOrderGap, nil
+	default:
+		return float64(time.Now().UTC().UnixMilli()), nil
+	}
+}
+
+func (s *Store) resequenceBoardLane(projectID string, status issue.Status, movingID string) error {
+	rows, err := s.db.Query(
+		`SELECT id FROM issues WHERE project_id=? AND status=? AND id!=? ORDER BY board_order DESC, updated_at DESC`,
+		projectID, status, movingID,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	base := float64(time.Now().UTC().UnixMilli())
+	for i, id := range ids {
+		order := base - float64(i+1)*boardOrderGap
+		if _, err := s.db.Exec(`UPDATE issues SET board_order=? WHERE id=?`, order, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SyncParentFromChildren rolls parent status from children when the given issue is a child.
+func (s *Store) SyncParentFromChildren(childID string) error {
+	var parentID sql.NullString
+	err := s.db.QueryRow(`SELECT parent_id FROM issues WHERE id = ?`, childID).Scan(&parentID)
+	if err != nil {
+		return err
+	}
+	if !parentID.Valid || parentID.String == "" {
+		return nil
+	}
+	return s.syncIssueProgressFromChildren(parentID.String)
+}
+
+func desiredParentStatus(total, done, active int, current issue.Status) (issue.Status, bool) {
+	if total == 0 {
+		return current, false
+	}
+	if done == total {
+		if current == issue.StatusDone || current == issue.StatusReview {
+			return current, false
+		}
+		return issue.StatusReview, true
+	}
+	if done > 0 || active > 0 {
+		switch current {
+		case issue.StatusTodo, issue.StatusReview, issue.StatusDone:
+			return issue.StatusDoing, true
+		default:
+			return current, false
+		}
+	}
+	if current == issue.StatusDoing || current == issue.StatusReview {
+		return issue.StatusTodo, true
+	}
+	return current, false
+}
+
+func (s *Store) syncIssueProgressFromChildren(parentID string) error {
+	var total, done, active int
+	err := s.db.QueryRow(`
+		SELECT COUNT(1),
+		       COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN status IN ('doing', 'review') THEN 1 ELSE 0 END), 0)
+		FROM issues WHERE parent_id = ?`, parentID).Scan(&total, &done, &active)
+	if err != nil {
+		return err
+	}
+	parent, err := s.GetIssue(parentID)
+	if err != nil {
+		return err
+	}
+	next, changed := desiredParentStatus(total, done, active, parent.Status)
+	if !changed {
+		return nil
+	}
+	_, err = s.db.Exec(
+		`UPDATE issues SET status=?, updated_at=? WHERE id=?`,
+		next, time.Now().UTC().Format(time.RFC3339), parentID,
+	)
+	return err
 }
 
 func (s *Store) hydrateIssue(it *issue.Issue) error {
@@ -1140,7 +1642,8 @@ func scanIssue(rows *sql.Rows) (*issue.Issue, error) {
 	if err := rows.Scan(
 		&it.ID, &it.ProjectID, &it.ProjectKey, &it.ProjectName, &it.Number, &it.Type, &it.Title, &it.Description,
 		&it.Status, &it.Priority, &it.AssigneeID, &it.AssigneeName, &it.CycleID, &it.CycleName,
-		&it.ModuleID, &it.ModuleName, &it.ParentID, &it.ParentKey, &it.CreatorID, &created, &updated,
+		&it.ModuleID, &it.ModuleName, &it.ParentID, &it.ParentKey, &it.StartDate, &it.DueDate,
+		&it.BoardOrder, &it.CreatorID, &created, &updated,
 		&it.ChildCount, &it.ChildDone, &it.AttachmentCount,
 	); err != nil {
 		return nil, err
@@ -1157,7 +1660,8 @@ func scanIssueRow(row *sql.Row) (*issue.Issue, error) {
 	if err := row.Scan(
 		&it.ID, &it.ProjectID, &it.ProjectKey, &it.ProjectName, &it.Number, &it.Type, &it.Title, &it.Description,
 		&it.Status, &it.Priority, &it.AssigneeID, &it.AssigneeName, &it.CycleID, &it.CycleName,
-		&it.ModuleID, &it.ModuleName, &it.ParentID, &it.ParentKey, &it.CreatorID, &created, &updated,
+		&it.ModuleID, &it.ModuleName, &it.ParentID, &it.ParentKey, &it.StartDate, &it.DueDate,
+		&it.BoardOrder, &it.CreatorID, &created, &updated,
 		&it.ChildCount, &it.ChildDone, &it.AttachmentCount,
 	); err != nil {
 		return nil, err
@@ -1228,7 +1732,7 @@ func (s *Store) CreateComment(issueID, authorID, body string) (*comment.Comment,
 
 func (s *Store) ListMembers(projectID string) ([]member.Member, error) {
 	rows, err := s.db.Query(`
-SELECT m.project_id, m.user_id, u.name, u.email, COALESCE(u.avatar,''), m.role, m.joined_at
+SELECT m.project_id, m.user_id, u.name, COALESCE(NULLIF(u.account,''), u.email), COALESCE(u.email,''), COALESCE(u.avatar,''), m.role, m.joined_at
 FROM project_members m
 JOIN users u ON u.id = m.user_id
 WHERE m.project_id = ?
@@ -1243,8 +1747,11 @@ ORDER BY
 	for rows.Next() {
 		var m member.Member
 		var joined, avatar string
-		if err := rows.Scan(&m.ProjectID, &m.UserID, &m.Name, &m.Email, &avatar, &m.Role, &joined); err != nil {
+		if err := rows.Scan(&m.ProjectID, &m.UserID, &m.Name, &m.Account, &m.Email, &avatar, &m.Role, &joined); err != nil {
 			return nil, err
+		}
+		if m.Email == m.Account {
+			m.Email = ""
 		}
 		if avatar != "" {
 			m.AvatarURL = "/api/avatars/" + m.UserID
@@ -1257,14 +1764,17 @@ ORDER BY
 
 func (s *Store) GetMember(projectID, userID string) (*member.Member, error) {
 	row := s.db.QueryRow(`
-SELECT m.project_id, m.user_id, u.name, u.email, COALESCE(u.avatar,''), m.role, m.joined_at
+SELECT m.project_id, m.user_id, u.name, COALESCE(NULLIF(u.account,''), u.email), COALESCE(u.email,''), COALESCE(u.avatar,''), m.role, m.joined_at
 FROM project_members m
 JOIN users u ON u.id = m.user_id
 WHERE m.project_id = ? AND m.user_id = ?`, projectID, userID)
 	var m member.Member
 	var joined, avatar string
-	if err := row.Scan(&m.ProjectID, &m.UserID, &m.Name, &m.Email, &avatar, &m.Role, &joined); err != nil {
+	if err := row.Scan(&m.ProjectID, &m.UserID, &m.Name, &m.Account, &m.Email, &avatar, &m.Role, &joined); err != nil {
 		return nil, err
+	}
+	if m.Email == m.Account {
+		m.Email = ""
 	}
 	if avatar != "" {
 		m.AvatarURL = "/api/avatars/" + m.UserID

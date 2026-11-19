@@ -1,5 +1,6 @@
 import { createRouter, createWebHashHistory } from "vue-router"
 import { getToken } from "../lib/api"
+import { useAuthStore } from "../stores/auth"
 
 export const router = createRouter({
   history: createWebHashHistory(),
@@ -21,6 +22,12 @@ export const router = createRouter({
       name: "projects",
       component: () => import("../views/ProjectsView.vue"),
       meta: { title: "项目" },
+    },
+    {
+      path: "/users",
+      name: "users",
+      component: () => import("../views/UsersAdminView.vue"),
+      meta: { title: "账号管理", admin: true },
     },
     {
       path: "/account",
@@ -49,8 +56,15 @@ export const router = createRouter({
   ],
 })
 
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   if (to.meta.public) return true
   if (!getToken()) return { name: "login", query: { redirect: to.fullPath } }
+  if (to.meta.admin) {
+    const auth = useAuthStore()
+    if (!auth.booted) {
+      await auth.fetchMe()
+    }
+    if (!auth.isAdmin) return { name: "home" }
+  }
   return true
 })
